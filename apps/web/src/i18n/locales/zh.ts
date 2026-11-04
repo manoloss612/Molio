@@ -1153,6 +1153,7 @@ const zh: Record<string, string> = {
   "adminAccess.returnToApp": "检查并返回应用",
   "adminAccess.streamPaused": "实时连接已暂停",
   "adminAccess.retryStream": "重新连接",
+  'adminAccess.streamReconnecting': '正在恢复实时连接…',
 };
 
 export default zh;

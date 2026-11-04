@@ -1,5 +1,5 @@
 import { test as base, expect } from '@playwright/test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -24,6 +24,9 @@ async function kill(child?: ChildProcess) {
 export async function startAdminServer(options: { webDir: string; username: string; password: string; mode?: 'server' | 'local' }): Promise<AdminServer> {
   const dir=mkdtempSync(join(tmpdir(),'molio-admin-ui-'));const dataDir=join(dir,'data');const vaultDir=join(dir,'vault');mkdirSync(vaultDir);
   writeFileSync(join(vaultDir,'acceptance.md'),'# Private acceptance marker\n\nOriginal saved text.\n');
+  writeFileSync(join(vaultDir,'pixel.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=','base64'));
+  copyFileSync(join(root,'apps/web/e2e/fixtures/sample.pdf'),join(vaultDir,'sample.pdf'));
+  writeFileSync(join(vaultDir,'images.md'),'# Private image\n\n![private](pixel.png)');
   const key=join(dir,'key.pem'),cert=join(dir,'cert.pem');
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost'],{stdio:'ignore'});
   const socket=createSocket();await new Promise<void>(r=>socket.listen(0,'127.0.0.1',r));const daemonPort=(socket.address() as {port:number}).port;await new Promise<void>(r=>socket.close(()=>r()));
@@ -47,8 +50,9 @@ export async function startAdminServer(options: { webDir: string; username: stri
 }
 export const test=base.extend<{admin:AdminServer},{adminWebDir:string}>({
   adminWebDir:[async({},use)=>{
-    const dir=mkdtempSync(join(tmpdir(),'molio-admin-web-build-'));const output=join(dir,'web');
-    try{execFileSync('pnpm',['--filter','@molio/web','exec','vite','build','--outDir',output,'--emptyOutDir'],{cwd:root,env:{...process.env,pnpm_config_verify_deps_before_run:'false',ELECTRON_SKIP_BINARY_DOWNLOAD:'1'},timeout:180000,stdio:'pipe'});await use(output);}finally{rmSync(dir,{recursive:true,force:true});}
+    const output = process.env.MOLIO_ADMIN_WEB_BUILD;
+    if (!output) throw new Error('Administrator assets must be freshly built by globalSetup');
+    await use(output);
   },{scope:'worker',timeout:180000,auto:true}],
   admin:async({adminWebDir},use)=>{const server=await startAdminServer({webDir:adminWebDir,username:'acceptance-admin',password:randomBytes(24).toString('hex')});try{await use(server);}finally{await server.stop();}},
 });

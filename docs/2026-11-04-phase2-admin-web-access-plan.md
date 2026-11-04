@@ -1,6 +1,6 @@
 # 第二期管理员 Web 使用闭环 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 本稿建议由当前 agent 顺序实施；是否实施、是否委派由用户后续确认。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户已批准顺序实施；当前 agent 执行，完成后进行一次独立全分支审核。
 
 **Goal:** 让单管理员通过同源 HTTPS Web 完成登录、管理读写、刷新恢复、会话失效处理与退出，并保持 local 直接使用。
 
@@ -10,7 +10,7 @@
 
 **Spec:** [2026-11-04-phase2-admin-web-access-design.md](2026-11-04-phase2-admin-web-access-design.md)
 
-状态：供审核的执行计划；复选框均未执行。本次授权仅形成设计与计划。以下命令是未来实施步骤，不是本次已运行证据。
+状态：用户已批准并正在执行。逐项完成状态和实际证据见执行记录与第二期审核指南；未完成的验收项不视为通过。
 
 ## Global Constraints
 

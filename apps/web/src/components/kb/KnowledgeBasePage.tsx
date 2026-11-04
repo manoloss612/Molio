@@ -1,3 +1,4 @@
+import { daemonFetch } from '../../api/http';
 /**
  * Knowledge Base page — assembles file panel, main content, wiki chat panel, and modals.
  * Now with: workspace tab system + right-click context menu + inline rename.

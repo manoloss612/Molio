@@ -1,3 +1,4 @@
+import { openManagedEvents } from '../api/managed-events';
 /**
  * Knowledge Base state management hook.
  * Manages vaults, file tree, file content, and UI state.
@@ -554,16 +555,15 @@ export function useKnowledge(): UseKnowledgeReturn {
   // external edits), so the tree updates without needing window focus.
   useEffect(() => {
     if (!activeVaultId) return;
-    const es = new EventSource(`/api/knowledge/vaults/${activeVaultId}/events`);
-    es.onmessage = (msg) => {
+    const es = openManagedEvents({ url: () => `/api/knowledge/vaults/${activeVaultId}/events`, onMessage: (msg) => {
       try {
         const payload = JSON.parse(msg.data);
         if (payload?.type === 'tree-changed') void refreshTree();
       } catch {
         // Ignore keepalive pings / parse errors
       }
-    };
-    // EventSource auto-reconnects on error; nothing to do here.
+    }});
+    // Reconnection and session verification belong to managed-events.
     return () => es.close();
   }, [activeVaultId, refreshTree]);
 
