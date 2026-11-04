@@ -262,11 +262,17 @@
         "apps/daemon/src/index.ts",
         "apps/daemon/src/core/db.ts",
         "apps/daemon/src/routes/auth.ts",
-        "apps/cloud/src/*"
+        "apps/cloud/src/*",
+        "apps/web/src/access/**",
+        "apps/web/src/components/access/**",
+        "apps/web/src/styles/admin-access.css",
+        "apps/web/src/api/http.ts",
+        "apps/web/src/api/managed-events.ts"
       ],
       "specs": [
         "auth",
-        "admin-access-server"
+        "admin-access-server",
+        "admin-access-ui"
       ]
     },
     "resources": {
@@ -664,6 +670,7 @@
       "priority": "P1",
       "file": "kb-tree-refresh-search.spec.ts"
     },
+
     "composer-skill-palette": {
       "priority": "P1",
       "file": "composer-skill-palette.spec.ts"
@@ -735,6 +742,10 @@
     "navigation-history": {
       "priority": "P1",
       "file": "navigation-history.spec.ts"
+    },
+    "admin-access-ui": {
+      "priority": "P0",
+      "file": "admin-access-ui.spec.ts"
     }
   }
 }
