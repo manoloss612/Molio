@@ -138,7 +138,11 @@ export const MdRenderer = memo(function MdRenderer({
           untrusted ? { untrusted: true } : undefined,
         );
         const finalHtml = postProcessHtml(html, readingTime, renderer);
-        if (!cancelled) setRendered({ html: finalHtml, source: content });
+        if (!cancelled) setRendered((previous) =>
+          previous.html === finalHtml && previous.source === content
+            ? previous
+            : { html: finalHtml, source: content },
+        );
       } catch (error) {
         console.error('Markdown rendering error:', error);
         if (!cancelled) setRendered({ html: `<p>Error rendering content: ${String(error)}</p>`, source: content });

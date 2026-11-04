@@ -285,6 +285,32 @@ function resolveWithFallbacks(vaultPath: string, relPath: string): string {
   return resolveFilePath(vaultPath, relPath);
 }
 
+/** Resolve directory segments case-insensitively, retaining real names and the vault boundary. */
+function resolveDirectoryCase(vaultPath: string, requestedDir: string): string | null {
+  const root = path.resolve(vaultPath);
+  assertWithinVault(vaultPath, requestedDir);
+  let current = root;
+  try {
+    for (const segment of path.relative(root, requestedDir).split(path.sep).filter(Boolean)) {
+      let candidate = path.join(current, segment);
+      if (!fs.existsSync(candidate)) {
+        const entries = fs.readdirSync(current, { withFileTypes: true });
+        if (entries.length > MAX_DIR_ENTRIES) return null;
+        const matches = entries.filter((entry) => entry.isDirectory() && entry.name.toLowerCase() === segment.toLowerCase());
+        // Ambiguous matches must not resolve to an arbitrary folder.
+        if (matches.length !== 1) return null;
+        candidate = path.join(current, matches[0]!.name);
+      }
+      const real = resolveRealWithinVault(vaultPath, candidate);
+      if (!fs.statSync(real).isDirectory()) return null;
+      current = candidate;
+    }
+    return current;
+  } catch {
+    return null;
+  }
+}
+
 /** Run the per-candidate fallback strategies (prefixes, .md, case, stem). */
 function tryResolveCandidate(vaultPath: string, relPath: string): string | null {
   const ext = path.extname(relPath).toLowerCase();
@@ -303,10 +329,13 @@ function tryResolveCandidate(vaultPath: string, relPath: string): string | null 
     const exact = resolveFilePath(vaultPath, baseRelPath);
     if (fs.existsSync(exact)) return exact;
 
+    const targetDir = resolveDirectoryCase(vaultPath, path.dirname(exact));
+    if (!targetDir) continue;
+
     // Strategy B: add .md extension (preserve on-disk case by listing entries)
     if (!hasExt) {
       const md = resolveFilePath(vaultPath, baseRelPath + '.md');
-      const mdDir = path.dirname(md);
+      const mdDir = targetDir;
       const mdBase = path.basename(md);
       try {
         const mdEntries = fs.readdirSync(mdDir);
@@ -322,7 +351,6 @@ function tryResolveCandidate(vaultPath: string, relPath: string): string | null 
     }
 
     // Strategy C: case-insensitive search in the target directory
-    const targetDir = path.dirname(exact);
     const targetBase = path.basename(exact);
     const targetLower = targetBase.toLowerCase();
     try {

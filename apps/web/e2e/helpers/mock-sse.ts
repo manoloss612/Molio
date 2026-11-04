@@ -104,6 +104,8 @@ export interface MockRunOptions {
    *  spinner that's cleared by the next event). When unset, all frames are
    *  delivered at once — fine for tests that only check the final state. */
   frameDelay?: number;
+  /** Hold terminal frames until the test has exercised the running state. */
+  terminalGate?: Promise<void>;
   /** 已持久化的会话历史消息（DB 加载 / 重挂载恢复用）。默认 [] —— 避免真实 daemon
    *  对未知 conv 404 → onLoadError 关标签。响应结构对齐 daemon：`{ messages: [...] }`。 */
   persistedMessages?: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: number }>;
@@ -213,6 +215,10 @@ export async function mockChatRun(page: Page, opts: MockRunOptions = {}) {
         let seq = 0;
         const streamScript = async (turn: readonly object[]) => {
           for (const evt of turn) {
+            const event = evt as { type?: string; label?: string };
+            if (opts.terminalGate && (event.type === 'turn_end' || (event.type === 'status' && ['completed', 'failed'].includes(event.label ?? '')))) {
+              await opts.terminalGate;
+            }
             seq += 1;
             res.write(sseFrame(seq, runId, evt));
             await new Promise((r) => setTimeout(r, opts.frameDelay));
