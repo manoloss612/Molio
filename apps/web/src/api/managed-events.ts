@@ -35,7 +35,12 @@ export function createManagedEvents(deps: { controller: AccessController; create
       checking = true; detach(); setState('checking');
       await deps.controller.revalidate('stream-error');
       checking = false; if (stopped || scope.closed) return;
-      if (!usable()) { waitingForAuth = true; resetAfterRecovery = true; setState('paused'); return; }
+      if (!usable()) {
+        waitingForAuth = true;
+        const state = deps.controller.getSnapshot();
+        resetAfterRecovery ||= state.status === 'authenticated' && state.health === 'unreachable';
+        setState('paused'); return;
+      }
       options.onError?.(event); if (!stopped) retry();
     }
     function connect() {
