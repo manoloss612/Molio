@@ -16,3 +16,5 @@
 .admin-access-overlay { position: fixed; inset: 0; z-index: 1000; background-color: #0006; }
 .admin-expiry-notice { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 40px); padding: 10px 16px; border-radius: 8px; background-color: var(--bg-secondary, #fff); border: 1px solid var(--border-color, #ddd); z-index: 800; font-size: 14px; }
 .admin-access-card :focus-visible { outline: 2px solid var(--accent, #c96442); outline-offset: 3px; }
+
+.admin-stream-notice { display: flex; gap: 12px; align-items: center; justify-content: center; padding: 10px; font-size: 13px; color: var(--text-secondary); }

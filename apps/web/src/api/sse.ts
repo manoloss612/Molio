@@ -1,21 +1,9 @@
 import type { AgentEvent } from '@molio/contracts';
+import { openManagedEvents, type ManagedEventSubscription, type ManagedTransportState } from './managed-events';
+import { accessController } from '../access/runtime';
+import { api } from './client';
 
-interface SSEEnvelope {
-  seq: number;
-  runId: string;
-  event: AgentEvent;
-}
-
-/**
- * Diagnostic switch (devtools console): `window.__MOLIO_DEBUG_SSE_OPEN_SILENT__ = true`
- * Keeps the EventSource at readyState=OPEN (connection looks healthy) but drops every
- * inbound message — simulating "events never reach the upper layer" to verify whether
- * the idle fallback fires and how long it takes, WITHOUT waiting for a real 3h hang.
- * Production never sets this.
- */
-const DEBUG_OPEN_SILENT = typeof window !== 'undefined'
-  && (window as any).__MOLIO_DEBUG_SSE_OPEN_SILENT__ === true;
-
+interface SSEEnvelope { seq: number; runId: string; event: AgentEvent }
 export function subscribeToRun(
   runId: string,
   onEvent: (event: AgentEvent, seq?: number) => void,
@@ -23,69 +11,38 @@ export function subscribeToRun(
   onDone?: () => void,
   afterSeq?: number,
   onKeepalive?: () => void,
-): EventSource {
-  // afterSeq > 0 → reconnect: ask daemon to replay buffered events with id > afterSeq
-  // (events.ts:20 supports ?after=). Used by the watchdog to reconnect to the SAME run
-  // after a dead connection, recovering missed events without losing session context.
-  const url = afterSeq && afterSeq > 0
-    ? `/api/runs/${runId}/events?after=${afterSeq}`
-    : `/api/runs/${runId}/events`;
-  const es = new EventSource(url);
-  // Snapshot the switch at subscribe time so toggling mid-run doesn't half-apply.
-  const openSilent = DEBUG_OPEN_SILENT
-    || (typeof window !== 'undefined'
-      && (window as any).__MOLIO_DEBUG_SSE_OPEN_SILENT__ === true);
-
-  es.onmessage = (msg) => {
-    // Diagnostic switch: drop every frame to simulate "events never reach the upper
-    // layer" — including ping, so the watchdog eventually fires. Used to verify the
-    // watchdog/reconnect path without waiting for a real 3h hang.
-    if (openSilent) {
-      console.warn('[sse] recv DROPPED (DEBUG_OPEN_SILENT) readyState=' + es.readyState);
-      return;
-    }
-    // Ping is a `data: ping` frame (daemon sse.ts). Recognize before JSON.parse and
-    // signal keepalive — this is the watchdog's heartbeat during turn gaps where no
-    // real chat events flow but the connection is still alive.
-    if (msg.data === 'ping') {
-      onKeepalive?.();
-      return;
-    }
-    try {
-      const envelope: SSEEnvelope = JSON.parse(msg.data);
-      // DEBUG-level: dev only. This fires per SSE frame — in a production
-      // build with DevTools open, Chromium retains every console message for
-      // the session, so per-frame debug output grows renderer memory without
-      // bound over a day of use. Vite strips this block from prod builds.
-      if (import.meta.env.DEV) {
-        console.debug('[sse] recv readyState=' + es.readyState + ' seq=' + envelope.seq + ' type=' + envelope.event.type);
-      }
-      onEvent(envelope.event, envelope.seq);
-    } catch {
-      // Ignore parse errors for any non-JSON keepalive variant
-    }
-  };
-
-  es.onerror = (err) => {
-    console.warn('[sse] error readyState=' + es.readyState + ' runId=' + runId);
-    onError?.(err);
-    // If the daemon process exited (connection closed for good, not a
-    // transient network blip), readyState is CLOSED. The browser's default
-    // auto-reconnect would hammer /api/runs/:id/events forever with no
-    // server to reach — close it and signal completion so the UI can
-    // unlock the input. Transient failures (readyState still CONNECTING/
-    // OPEN) keep the default reconnect behavior.
-    if (es.readyState === EventSource.CLOSED) {
-      console.warn('[sse] done (CLOSED) runId=' + runId);
-      es.close();
-      onDone?.();
-    }
-  };
-
-  // Log open lifecycle once so we can see when a subscription is (re)established.
-  if (import.meta.env.DEV) {
-    console.debug('[sse] subscribe runId=' + runId + ' openSilent=' + openSilent);
-  }
-
-  return es;
+  onTransportState?: (state: ManagedTransportState) => void,
+): ManagedEventSubscription {
+  let lastSeq = afterSeq ?? 0; let closed = false; let reconciling = false;
+  const subscription = openManagedEvents({
+    url: () => `/api/runs/${runId}/events${lastSeq > 0 ? `?after=${lastSeq}` : ''}`,
+    onState: onTransportState,
+    onMessage(msg) {
+      if (closed) return;
+      if (typeof window !== 'undefined' && (window as any).__MOLIO_DEBUG_SSE_OPEN_SILENT__ === true) return;
+      if (msg.data === 'ping') { onKeepalive?.(); return; }
+      try {
+        const envelope: SSEEnvelope = JSON.parse(msg.data);
+        if (envelope.seq <= lastSeq) return;
+        lastSeq = envelope.seq;
+        onEvent(envelope.event, envelope.seq);
+      } catch { /* non-JSON keepalive */ }
+    },
+    onLocalClosed: onDone,
+    onError(event) {
+      onError?.(event);
+      const context = accessController.getContext();
+      if (!context || context.mode !== 'server' || reconciling || closed) return;
+      reconciling = true;
+      // EOF is not completion. Only an authoritative terminal run state can
+      // finish an empty replay; a running/unknown run keeps its observation.
+      void api.getRun(runId).then(run => {
+        if (closed || accessController.getContext()?.resources !== context.resources) return;
+        if (['succeeded', 'failed', 'canceled'].includes(run.status)) {
+          closed = true; subscription.close(); onDone?.();
+        }
+      }).catch(() => {}).finally(() => { reconciling = false; });
+    },
+  });
+  return { close() { closed = true; subscription.close(); }, reconnect() { if (!closed) subscription.reconnect(); } };
 }

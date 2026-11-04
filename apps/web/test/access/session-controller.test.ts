@@ -76,3 +76,8 @@ test('login rate limiting exposes a retry deadline without exposing submitted da
   const f=fixture();await f.controller.revalidate('startup');f.setHandler(async()=>f.json({error:'rate_limited'},429,{'Retry-After':'60'}));
   await assert.rejects(f.controller.login({username:'admin',password:'secret'}),(err:any)=>err.code==='rate_limited'&&err.retryAt===f.time.now()+60_000&&!JSON.stringify(err).includes('secret'));
 });
+test('HTTP-date Retry-After is parsed without retaining login input',async()=>{
+  const f=fixture();await f.controller.revalidate('startup');const retryAt=f.time.now()+60_000;
+  f.setHandler(async()=>f.json({error:'rate_limited'},429,{'Retry-After':new Date(retryAt).toUTCString()}));
+  await assert.rejects(f.controller.login({username:'admin',password:'ephemeral'}),(err:any)=>err.retryAt===retryAt&&!JSON.stringify(err).includes('ephemeral'));
+});

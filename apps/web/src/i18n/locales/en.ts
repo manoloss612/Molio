@@ -1061,6 +1061,7 @@ const en: Record<string, string> = {
   "adminAccess.returnToApp": "Check and return",
   "adminAccess.streamPaused": "Live connection paused",
   "adminAccess.retryStream": "Reconnect",
+  'adminAccess.streamReconnecting': 'Restoring the live connection…',
 };
 
 export default en;

@@ -1,3 +1,4 @@
+import { daemonFetch } from '../../api/http';
 /**
  * Knowledge Base page — assembles file panel, main content, wiki chat panel, and modals.
  * Now with: workspace tab system + right-click context menu + inline rename.
@@ -831,7 +832,7 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
   useEffect(() => {
     if (!loggedIn) { setIsMarketAdmin(false); return; }
     let alive = true;
-    fetch('/api/market/my')
+    daemonFetch('/api/market/my')
       .then((r) => (r.ok ? r.json() : null))
       .then((m: { isAdmin?: boolean } | null) => { if (alive) setIsMarketAdmin(m?.isAdmin === true); })
       .catch(() => { if (alive) setIsMarketAdmin(false); });
