@@ -60,3 +60,8 @@ test('closing before deferred initialization prevents all later subscriptions',a
   const f=await setup();let resolve!:(c:typeof f.controller)=>void;let created=0;
   const open=createDeferredManagedEvents(()=>new Promise(r=>{resolve=r;}),()=>()=>{created++;return{close(){},reconnect(){}};});const sub=open({url:()=>'/api/x',onMessage:()=>{}});sub.close();resolve(f.controller);await tick();sub.reconnect();assert.equal(created,0);
 });
+test('a superseding peer probe is not a network recovery and cannot renew a failed stream budget',async()=>{
+  const f=await setup();f.open({url:()=>'/api/runs/x/events',onMessage:()=>{},onState:s=>f.states.push(s)});
+  for(let i=0;i<12;i++){f.streams.at(-1)!.fail();const peer=f.controller.revalidate('peer');await peer;await tick();f.time.advance(16_000);await tick();}
+  assert.ok(f.streams.length<=5,`created ${f.streams.length} streams`);assert.equal(f.states.at(-1),'paused');
+});
