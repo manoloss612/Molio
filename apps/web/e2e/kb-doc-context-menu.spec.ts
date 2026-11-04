@@ -92,6 +92,30 @@ test('drag selection survives mouseup', async ({ page }) => {
   expect(sel.length).toBeGreaterThan(0);
 });
 
+test('a late identical markdown render preserves an existing selection', async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/tex-svg-full.js*', async (route) => {
+    if (route.request().url().includes('?url')) return route.continue();
+    await gate; await route.continue();
+  });
+  try {
+    await page.goto(`/knowledge?vault=${vaultId}&file=sel-test.md`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.kb-content-area #output section', { timeout: 10_000 });
+    await dragParagraph(page);
+    const selected = await page.evaluate(() => window.getSelection()?.toString() ?? '');
+    expect(selected).toContain('中文内容');
+    const loaded = page.waitForResponse((response) => response.url().includes('tex-svg-full.js'));
+    release();
+    await loaded;
+    await page.waitForFunction(() => typeof (window as any).MathJax?.tex2svg === 'function');
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe(selected);
+    // Allow React's render effect to commit after MathJax's startup settles.
+    await page.waitForTimeout(500);
+    expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe(selected);
+  } finally { release(); }
+});
+
 test('context menu appears with correct items and disabled states', async ({ page }) => {
   await openFile(page);
   const para = page.locator('#output section p').first();

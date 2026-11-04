@@ -237,11 +237,17 @@
         "apps/web/src/styles/account.css",
         "apps/web/src/api/client.*",
         "apps/daemon/src/core/auth/*",
+        "apps/daemon/src/core/access/*",
+        "apps/daemon/src/routes/access.ts",
+        "apps/daemon/src/server.ts",
+        "apps/daemon/src/index.ts",
+        "apps/daemon/src/core/db.ts",
         "apps/daemon/src/routes/auth.ts",
         "apps/cloud/src/*"
       ],
       "specs": [
-        "auth"
+        "auth",
+        "admin-access-server"
       ]
     },
     "resources": {
@@ -309,6 +315,10 @@
     }
   },
   "specs": {
+    "admin-access-server": {
+      "priority": "P1",
+      "file": "admin-access-server.spec.ts"
+    },
     "auth": {
       "priority": "P1",
       "file": "auth.spec.ts"

@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { gotoHome } from './helpers/navigation';
-import { mockChatRun, unmockAll } from './helpers/mock-sse';
+import { mockAgent, mockChatRun, unmockAll } from './helpers/mock-sse';
 import { createTempVault, cleanupTempVault, type TempVault } from './helpers/cleanup';
 
 /**
@@ -79,6 +79,12 @@ test.afterAll(async () => {
 });
 
 test.describe('Composer / skill palette', () => {
+  // Palette interactions do not depend on a locally installed runtime.
+  // A previous test may have selected a runtime that is absent on this host.
+  test.beforeEach(async ({ page }) => {
+    await mockAgent(page);
+  });
+
   test('typing / at input start opens the palette listing installed skills', async ({ page }) => {
     await gotoHome(page);
     const input = page.locator('[data-testid="composer-input"]');

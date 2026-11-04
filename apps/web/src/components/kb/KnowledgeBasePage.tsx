@@ -207,8 +207,14 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
   // create, import, delete), reflect it into ?vault= so the URL stays an
   // accurate serialization of the window. Must come AFTER the file-nav effect.
   useEffect(() => {
-    if (!kb.activeVault?.id) return;
-    setSearchParams({ vault: kb.activeVault.id }, { replace: true });
+    const vaultId = kb.activeVault?.id;
+    if (!vaultId) return;
+    // Read the current URL: another navigation can occur before this effect
+    // runs, so a render-time searchParams snapshot may already be stale.
+    const next = new URLSearchParams(window.location.search);
+    if (next.get('vault') === vaultId) return;
+    next.set('vault', vaultId);
+    setSearchParams(next, { replace: true });
   }, [kb.activeVault?.id, setSearchParams]);
 
   // Handle location.state for in-app navigation (e.g., from graph double-click)

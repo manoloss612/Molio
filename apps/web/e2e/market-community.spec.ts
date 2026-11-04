@@ -372,7 +372,9 @@ test.describe('社区发布 → 展示 → 下载闭环（P1，mock OSS）', () 
     const myListingsSettled = page
       .waitForResponse((r) => r.url().includes('/api/market/my'), { timeout: 10_000 })
       .catch(() => null);
-    // 已登录点账号入口 → 导航 /me（authStore 未决时弹窗一闪、由 NavRail 竞态兜底导航）
+    // Wait for the restored login state before clicking: while it is pending,
+    // the same button opens the login modal instead of navigating to /me.
+    await expect(page.locator('[data-testid="nav-account-btn"]')).toHaveClass(/is-logged-in/, { timeout: 10_000 });
     await page.locator('[data-testid="nav-account-btn"]').click();
     await expect(page).toHaveURL(/\/me$/, { timeout: 10_000 });
     await myListingsSettled;
