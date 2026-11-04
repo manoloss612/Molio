@@ -357,7 +357,9 @@ export function useChatCore(options: UseChatCoreOptions) {
       // ignore it so we don't clear runId/isRunning mid-swap. Only the NEW es's
       // onDone (or a genuine daemon exit) should unlock.
       if (reconnectingRef.current || !accessController.getContext()) return;
-      console.warn('[chat] SSE onDone (CLOSED) — force-unlocking. runId=' + runId);
+      // In server mode onDone is authoritative only after a complete terminal replay.
+      transportRef.current = 'open'; setTransportState('open');
+      console.warn('[chat] SSE observation completed. runId=' + runId);
       clearWatchdog();
       reconnectRef.current = null;
       // 连接关闭 → 尾随窗口作废（防御：防止 stale 窗口污染后续 run）。
@@ -446,7 +448,7 @@ export function useChatCore(options: UseChatCoreOptions) {
     optimisticMessages: ChatMessage[],
   ) => {
     const context = accessController.getContext();
-    if (!context) return;
+    if (!context || (context.mode === 'server' && transportRef.current !== 'open')) return;
     // Route incoming SSE events to the new assistant message.
     assistantIdRef.current = assistantMsg.id;
 
@@ -533,7 +535,8 @@ export function useChatCore(options: UseChatCoreOptions) {
    * they must reach the agent immediately.
    */
   const send = useCallback(async (text: string, opts?: { queueIfRunning?: boolean }) => {
-    if (!text.trim()) return;
+    const context = accessController.getContext();
+    if (!text.trim() || !context || (context.mode === 'server' && transportRef.current !== 'open')) return;
     const trimmed = text.trim();
     const cur = stateRef.current;
 

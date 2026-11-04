@@ -49,3 +49,7 @@ test('a business 403 is returned once, while replacement CSRF and offline checks
     assert.equal(writes,1);assert.deepEqual(f.retired,scenario==='replaced'?['session-changed']:[]);
   }
 });
+test('management requests cannot forward CSRF through an external redirect',async()=>{
+  const f=fixture();f.setSession(f.authenticated());await f.controller.revalidate('startup');let redirect:RequestRedirect|undefined;
+  const send=createDaemonFetch(f.controller,(async(_url,init)=>{redirect=init?.redirect;return new Response('{}');}) as typeof fetch,'https://molio.test');await send('/api/config',{method:'PUT',redirect:'follow'});assert.equal(redirect,'error');
+});

@@ -12,7 +12,7 @@ export function createManagedEvents(deps: { controller: AccessController; create
     if (!initial) throw new AdminAccessError('session_unconfirmed');
     const mode = initial.mode;
     const scope = initial.resources; let native: EventSource | null = null;
-    let stopped = false; let checking = false; let waitingForAuth = false; let retries = 0;
+    let stopped = false; let checking = false; let waitingForAuth = false; let resetAfterRecovery = false; let retries = 0;
     let cancelRetry = () => {}; let unsubscribe = () => {}; let unregister = () => {};
     const setState = (state: ManagedTransportState) => options.onState?.(state);
     const usable = () => !stopped && !scope.closed && deps.controller.getContext()?.resources === scope;
@@ -35,7 +35,7 @@ export function createManagedEvents(deps: { controller: AccessController; create
       checking = true; detach(); setState('checking');
       await deps.controller.revalidate('stream-error');
       checking = false; if (stopped || scope.closed) return;
-      if (!usable()) { waitingForAuth = true; setState('paused'); return; }
+      if (!usable()) { waitingForAuth = true; resetAfterRecovery = true; setState('paused'); return; }
       options.onError?.(event); if (!stopped) retry();
     }
     function connect() {
@@ -49,20 +49,40 @@ export function createManagedEvents(deps: { controller: AccessController; create
     unsubscribe = deps.controller.subscribe(() => {
       if (stopped || checking) return;
       if (scope.closed) { close(); return; }
-      if (!usable()) { detach(); waitingForAuth = true; setState('paused'); }
-      else if (waitingForAuth) { waitingForAuth = false; retries = 0; retry(); }
+      if (!usable()) {
+        const state = deps.controller.getSnapshot();
+        if (state.status === 'authenticated' && state.health === 'unreachable') resetAfterRecovery = true;
+        detach(); waitingForAuth = true; setState('paused');
+      }
+      else if (waitingForAuth) { waitingForAuth = false; if (resetAfterRecovery) retries = 0; resetAfterRecovery = false; retry(); }
     });
     unregister = scope.track(close); connect();
     return { close, reconnect() { if (!usable() || checking) return; retries = 0; waitingForAuth = false; connect(); } };
   };
 }
-let productionOpen: ReturnType<typeof createManagedEvents> | undefined;
-export function openManagedEvents(options: ManagedEventsOptions): ManagedEventSubscription {
-  let subscription: ManagedEventSubscription | undefined; let closed = false;
-  void import('../access/runtime').then(({ accessController }) => {
-    if (closed) return;
-    productionOpen ??= createManagedEvents({ controller: accessController, createNative: url => new EventSource(url), schedule: (fn, ms) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); } });
-    subscription = productionOpen(options);
-  }).catch(() => { if (!closed) options.onState?.('paused'); });
-  return { close() { closed = true; subscription?.close(); }, reconnect() { if (!closed) subscription?.reconnect(); } };
+export function createDeferredManagedEvents(load: () => Promise<AccessController>, makeOpen: (controller: AccessController) => ReturnType<typeof createManagedEvents>) {
+  return (options: ManagedEventsOptions): ManagedEventSubscription => {
+    let subscription: ManagedEventSubscription | undefined; let closed = false;
+    let controller: AccessController | undefined; let unsubscribe = () => {};
+    const initialize = () => {
+      if (closed || subscription || !controller?.getContext()) return;
+      subscription = makeOpen(controller)(options); unsubscribe();
+    };
+    void load().then(value => {
+      if (closed) return;
+      controller = value;
+      unsubscribe = controller.subscribe(initialize);
+      initialize();
+      if (!subscription) options.onState?.('paused');
+    }).catch(() => { if (!closed) options.onState?.('paused'); });
+    return {
+      close() { if (closed) return; closed = true; unsubscribe(); subscription?.close(); },
+      reconnect() { if (closed) return; if (subscription) subscription.reconnect(); else initialize(); },
+    };
+  };
 }
+let productionOpen: ReturnType<typeof createManagedEvents> | undefined;
+export const openManagedEvents = createDeferredManagedEvents(
+  async () => (await import('../access/runtime')).accessController,
+  controller => productionOpen ??= createManagedEvents({ controller, createNative: url => new EventSource(url), schedule: (fn, ms) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); } }),
+);

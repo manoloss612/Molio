@@ -74,3 +74,10 @@ test('revocation closes and cleans each real management stream', async () => {
     }
   } finally { store.revokeAll(); closeDatabase(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('knowledge heartbeat is an observable SSE message and releases its timer',async(t)=>{
+  t.mock.timers.enable({apis:['setInterval']});
+  const clear=t.mock.method(globalThis,'clearInterval');
+  const dir=mkdtempSync(join(tmpdir(),'molio-heartbeat-'));const db=openDatabase(dir);const watcher=new VaultWatcher(db);const vault=createVault(db,'heartbeat',dir);let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
+  try{const app=new Hono();app.route('/api/knowledge',knowledgeRoutes(db,{} as RunManager,watcher));const response=await app.request(`/api/knowledge/vaults/${vault.id}/events`);reader=response.body!.getReader();assert.equal(new TextDecoder().decode((await reader.read()).value),'data: ping\n\n');const pending=reader.read();t.mock.timers.tick(15000);const result=await pending;assert.equal(new TextDecoder().decode(result.value),'data: ping\n\n');await reader.cancel();await turn();assert.equal(watcher.listenerCount('tree-changed'),0);assert.equal(clear.mock.callCount(),1);}finally{await reader?.cancel().catch(()=>{});t.mock.timers.reset();closeDatabase();rmSync(dir,{recursive:true,force:true});}
+});

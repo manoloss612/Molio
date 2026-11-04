@@ -122,9 +122,10 @@ export function createAccessController(deps: AccessDependencies): AccessControll
     },
     revalidate(reason) {
       if (terminal() || state.status === 'logging-out') return Promise.resolve(state);
+      if (pending && ['peer', 'expiry'].includes(reason)) invalidate();
+      if (session && ['expiry', 'http-error', 'stream-error', 'peer'].includes(reason)) { blocked = true; emit({ ...state }); }
       if (pending) return pending;
       const seq = version;
-      if (session && ['expiry', 'http-error', 'stream-error', 'peer'].includes(reason)) { blocked = true; emit({ ...state }); }
       let task!: Promise<AccessState>;
       task = (async () => {
         try {
@@ -152,6 +153,8 @@ export function createAccessController(deps: AccessDependencies): AccessControll
           const retryAt = seconds !== null ? deps.now() + seconds * 1000 : header ? Date.parse(header) : NaN;
           throw new AdminAccessError(data && typeof data === 'object' && 'error' in data && typeof data.error === 'string' ? data.error : `http_${response.status}`, response.status, Number.isFinite(retryAt) ? retryAt : null);
         }
+        // A focus/poll request may have started before POST applied its cookie.
+        invalidate();
         await controller.revalidate('startup');
         if (controller.getSnapshot().status !== 'authenticated') throw new AdminAccessError('session_unconfirmed');
         deps.notifyPeer();

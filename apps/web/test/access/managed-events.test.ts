@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createManagedEvents } from '../../src/api/managed-events.ts';
+import { createManagedEvents, createDeferredManagedEvents } from '../../src/api/managed-events.ts';
 import { fixture, tick } from './helpers.ts';
 
 class NativeStream {
@@ -42,4 +42,21 @@ test('network uncertainty pauses, a confirmed recovery resumes, and an explicit 
 test('local native CLOSED keeps the original completion behavior',async()=>{
   const f=await setup(true);let done=0;f.open({url:()=>'/api/runs/x/events',onMessage:()=>{},onLocalClosed:()=>done++});
   f.streams[0].fail();assert.equal(done,1);
+});
+test('two failed subscriptions share checks without resetting either retry budget',async()=>{
+  const f=await setup();const a:string[]=[],b:string[]=[];
+  f.open({url:()=>'/api/runs/x/events',onMessage:()=>{},onState:s=>a.push(s)});f.open({url:()=>'/api/knowledge/x/events',onMessage:()=>{},onState:s=>b.push(s)});
+  for(let i=0;i<15;i++){for(const stream of [...f.streams])stream.fail();await tick();f.time.advance(16_000);await tick();}
+  assert.ok(f.streams.length<=10,`created ${f.streams.length} streams`);assert.equal(a.at(-1),'paused');assert.equal(b.at(-1),'paused');assert.equal(f.time.count(),0);
+});
+
+test('deferred creation waits through a check and reconnect can initialize a previously paused handle',async()=>{
+  const f=await setup();let release!:(r:Response)=>void;f.setHandler(async()=>new Promise(r=>{release=r;}));const check=f.controller.revalidate('http-error');
+  const open=createDeferredManagedEvents(async()=>f.controller,controller=>createManagedEvents({controller,schedule:f.time.schedule,createNative:()=>{const stream=new NativeStream();f.streams.push(stream);return stream as unknown as EventSource;}}));
+  const sub=open({url:()=>'/api/runs/r/events',onMessage:()=>{}});await tick();assert.equal(f.streams.length,0);
+  release(f.json(f.authenticated()));await check;await tick();assert.equal(f.streams.length,1);sub.reconnect();await tick();assert.equal(f.streams.length,2);sub.close();assert.ok(f.streams.every(s=>s.closes===1));
+});
+test('closing before deferred initialization prevents all later subscriptions',async()=>{
+  const f=await setup();let resolve!:(c:typeof f.controller)=>void;let created=0;
+  const open=createDeferredManagedEvents(()=>new Promise(r=>{resolve=r;}),()=>()=>{created++;return{close(){},reconnect(){}};});const sub=open({url:()=>'/api/x',onMessage:()=>{}});sub.close();resolve(f.controller);await tick();sub.reconnect();assert.equal(created,0);
 });

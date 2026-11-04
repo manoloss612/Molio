@@ -788,6 +788,7 @@ export function knowledgeRoutes(
 
     return stream(c, async (s) => {
       c.req.raw.signal.addEventListener('abort', sseStream.cleanup);
+      s.onAbort(sseStream.cleanup);
       try {
         await s.pipe(sseStream.stream);
       } catch (err) {
@@ -798,6 +799,9 @@ export function knowledgeRoutes(
         if ((err as NodeJS.ErrnoException)?.code !== 'ERR_INVALID_STATE') {
           throw err;
         }
+      } finally {
+        c.req.raw.signal.removeEventListener('abort', sseStream.cleanup);
+        sseStream.cleanup();
       }
     });
   });
@@ -827,6 +831,7 @@ function createVaultSSEStream(
   const encoder = new TextEncoder();
   let ping: ReturnType<typeof setInterval> | null = null;
   let listener: ((changedId: string) => void) | null = null;
+  let output: ReadableStreamDefaultController<Uint8Array> | undefined;
 
   const doCleanup = () => {
     if (ping) {
@@ -841,6 +846,9 @@ function createVaultSSEStream(
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      output = controller;
+      // Flush headers and make a newly connected stream observable immediately.
+      controller.enqueue(encoder.encode('data: ping\n\n'));
       listener = (changedId: string) => {
         if (changedId !== vaultId) return;
         const frame = `data: ${JSON.stringify({ type: 'tree-changed' })}\n\n`;
@@ -854,7 +862,7 @@ function createVaultSSEStream(
 
       ping = setInterval(() => {
         try {
-          controller.enqueue(encoder.encode(':ping\n\n'));
+          controller.enqueue(encoder.encode('data: ping\n\n'));
         } catch {
           /* stream closed */
         }
@@ -868,10 +876,11 @@ function createVaultSSEStream(
 
   return {
     stream,
-    // cleanup() is the external API for Hono route handlers — triggers cancel()
-    // which does the actual teardown. cancel() resolves silently on closed streams.
+    // The producer is locked while Hono pipes it; stream.cancel() cannot
+    // release its resources then. Close the producer and dispose directly.
     cleanup: () => {
-      stream.cancel().catch(() => {});
+      doCleanup();
+      try { output?.close(); } catch { /* already closed or canceled */ }
     },
   };
 }
