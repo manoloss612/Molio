@@ -228,3 +228,17 @@ test('verified terminal replay drains an already queued intent only after recove
 test('a production resource deep link survives administrator login and refresh',async({page,admin})=>{
   const url=`${admin.origin}/resources/acceptance-item?from=deep#keep`;await page.goto(url);await login(page,admin);await expect(page).toHaveURL(url);await page.reload();await expect(page.locator('.entry-shell')).toBeVisible();await expect(page.getByTestId('admin-logout-btn')).toBeVisible();await expect(page).toHaveURL(url);
 });
+test('local transient stream errors keep the composer usable for the next turn',async({page,adminWebDir})=>{
+  const local=await startAdminServer({webDir:adminWebDir,username:'unused',password:'unused local test password',mode:'local'});
+  try{await page.addInitScript(()=>{class Stream {readyState=0;onopen:any=null;onmessage:any=null;onerror:any=null;constructor(url:string){if(url.includes('/runs/'))setTimeout(()=>{this.readyState=1;this.onopen?.(new Event('open'));for(const [i,event]of [{type:'text_delta',delta:'Local first reply'},{type:'turn_end',stopReason:'end_turn'}].entries())this.onmessage?.({data:JSON.stringify({seq:i+1,runId:'local-turn',event})});this.readyState=0;this.onerror?.(new Event('error'));},50);}close(){this.readyState=2;}}Object.defineProperty(window,'EventSource',{value:Stream});});
+    let writes=0;await page.route('**/api/agents',r=>r.fulfill({json:{agents:[{id:'codex',name:'Codex',available:true,binary:'/test/codex',source:'path',version:'test',models:[],installUrl:''}]}}));await page.route('**/api/runs',r=>r.fulfill({json:r.request().method()==='POST'?{runId:'local-turn'}:{runs:[]}}));await page.route('**/api/runs/local-turn/messages',r=>{writes++;return r.fulfill({json:{}});});
+    await page.goto(`${local.origin}/chat`);const composer=page.getByTestId('composer-input');await composer.fill('first local intent');await composer.press('Enter');await expect(page.getByTestId('assistant-message')).toContainText('Local first reply');await expect(page.getByTestId('composer-stop')).toHaveCount(0);await expect(composer).toBeEnabled();await composer.fill('second local intent');await composer.press('Enter');await expect.poll(()=>writes).toBe(1);await expect(page.getByTestId('chat-transport-status')).toHaveCount(0);
+  }finally{await local.stop();}
+});
+test('the multi-turn SSE fixture advances sequence numbers only for a new turn',async({page,admin})=>{
+  await page.goto(`${admin.origin}/settings`);await login(page,admin);
+  const {mockChatRun,unmockAll}=await import('./helpers/mock-sse');await mockChatRun(page,{runId:'sequence-check',multiTurn:true});
+  try{const ranges=await page.evaluate(async()=>{const read=async()=>{const text=await(await fetch('/api/runs/sequence-check/events')).text();return text.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6)).seq);};const first=await read();await fetch('/api/runs/sequence-check/messages',{method:'POST',headers:{'content-type':'application/json'},body:'{"message":"next"}'});const second=await read();const replay=await read();return{first,second,replay};});
+    expect(ranges.second[0]).toBe(ranges.first.at(-1)+1);expect(ranges.replay).toEqual(ranges.second);
+  }finally{await unmockAll(page);}
+});

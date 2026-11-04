@@ -820,7 +820,7 @@ export function useChatCore(options: UseChatCoreOptions) {
 
   return {
     ...state,
-    transportState, retryTransport,
+    transportState: accessController.getContext()?.mode === 'local' ? 'open' : transportState, retryTransport,
     send,
     resumeRun,
     submitToolResult,
