@@ -1,4 +1,5 @@
-import { daemonFetch } from './http';
+import { daemonFetch, getDaemonResponseSignal } from './http';
+import { consumeSseData } from './read-stream';
 import type {
   AgentInfo, InstallEvent, RunInfo, CreateRunRequest, ToolResultRequest,
   RewindResendRequest,
@@ -162,45 +163,16 @@ export const api = {
       return errorEvent;
     }
 
-    const reader = res.body?.getReader();
-    if (!reader) {
-      const errorEvent: InstallEvent = {
-        type: 'error',
-        message: 'No response stream',
-        category: 'unknown',
-        retryable: false,
-      };
-      onEvent(errorEvent);
-      return errorEvent;
+    if (!res.body) {
+      const errorEvent: InstallEvent = { type: 'error', message: 'No response stream', category: 'unknown', retryable: false };
+      onEvent(errorEvent); return errorEvent;
     }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
     let lastEvent: InstallEvent = { type: 'log', message: '' };
-
-    try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event: InstallEvent = JSON.parse(line.slice(6));
-            onEvent(event);
-            lastEvent = event;
-          } catch {
-            // Skip malformed SSE frames
-          }
-        }
-      }
-    }
-
-    } finally { reader.releaseLock(); }
+    await consumeSseData(res.body, getDaemonResponseSignal(res), data => {
+      let event: InstallEvent;
+      try { event = JSON.parse(data); } catch { return; }
+      onEvent(event); lastEvent = event;
+    });
 
     return lastEvent;
   },
@@ -871,37 +843,14 @@ export const api = {
       throw new Error(err.error ?? `Preload start failed: ${res.status}`);
     }
 
-    const reader = res.body?.getReader();
-    if (!reader) {
-      throw new Error('No response stream');
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(line.slice(6));
-            onProgress(event);
-          } catch {
-            // Skip malformed
-          }
-        }
-      }
-    }
-    } finally { reader.releaseLock(); }
-
+    if (!res.body) throw new Error('No response stream');
+    await consumeSseData(res.body, getDaemonResponseSignal(res), data => {
+      let event: { skill: string; status: string; progress: number; message: string };
+      try { event = JSON.parse(data); } catch { return; }
+      onProgress(event);
+    });
   },
+
 
   async dismissPreload(skills: string[]): Promise<void> {
     const res = await daemonFetch(`${BASE}/preload/dismiss`, {

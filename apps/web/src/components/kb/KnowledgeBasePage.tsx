@@ -1435,6 +1435,10 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
 
   return (
     <div className="kb-shell">
+      {kb.transportState !== 'open' && kb.transportState !== 'closed' && <div className="admin-stream-notice admin-kb-stream-notice" data-testid="kb-transport-status" data-state={kb.transportState} role="status">
+        <span>{t(kb.transportState === 'paused' ? 'adminAccess.streamPaused' : 'adminAccess.streamReconnecting')}</span>
+        <button type="button" data-testid="kb-transport-retry" disabled={kb.transportState === 'checking'} onClick={kb.retryTransport}>{t('adminAccess.retryStream')}</button>
+      </div>}
       {/* File Panel */}
       <KbFilePanel
         ref={filePanelRef}

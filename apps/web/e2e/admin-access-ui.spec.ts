@@ -58,15 +58,15 @@ test('administrator saves a real knowledge document through the editor',async({p
   expect((await saved).status()).toBe(200);expect(readFileSync(join(admin.vaultDir,'acceptance.md'),'utf8')).toContain('Saved by administrator');
 });
 test('server stream closure pauses observation without sending queued messages or creating another run',async({page,admin})=>{
-  let creates=0;let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});
+  await page.addInitScript(()=>{class ControlledStream {readyState=0;onopen:any=null;onmessage:any=null;onerror:any=null;constructor(url:string){setTimeout(()=>{this.readyState=1;this.onopen?.(new Event('open'));},50);if(url.includes('/runs/'))(window as any).__closeObservedRun=()=>{this.readyState=2;this.onerror?.(new Event('error'));};}close(){this.readyState=2;}}Object.defineProperty(window,'EventSource',{value:ControlledStream});});
+  let creates=0;
   await page.route('**/api/agents',r=>r.fulfill({json:{agents:[{id:'codex',name:'Codex',available:true,binary:'/test/codex',source:'path',version:'test',models:[],installUrl:''}]}}));
   await page.route('**/api/runs',r=>{if(r.request().method()==='POST'){creates++;return r.fulfill({json:{runId:'acceptance-run'}});}return r.fulfill({json:{runs:[]}});});
   await page.route('**/api/runs/acceptance-run',r=>r.fulfill({json:{id:'acceptance-run',agentId:'codex',status:'running',createdAt:Date.now(),lastStopReason:null,conversationId:null}}));
-  await page.route('**/api/runs/acceptance-run/events*',async r=>{await gate;await r.fulfill({status:204});});
   await page.goto(`${admin.origin}/chat`);await login(page,admin);
   const composer=page.locator('[data-testid="composer-input"]');await composer.fill('first intended message');await composer.press('Enter');
-  await expect.poll(()=>creates).toBe(1);await composer.fill('queued intended message');await composer.press('Enter');
-  release();await expect(page.locator('[data-testid="chat-transport-status"]')).toBeVisible({timeout:15000});
+  await expect.poll(()=>creates).toBe(1);await expect(composer).toBeEnabled();await composer.fill('queued intended message');await composer.press('Enter');
+  await page.evaluate(()=>(window as any).__closeObservedRun());await expect(page.locator('[data-testid="chat-transport-status"]')).toBeVisible({timeout:15000});
   expect(creates).toBe(1);await expect(page.locator('[data-testid="chat-transport-retry"]')).toBeVisible();
 });
 test('shared-cookie tabs sign out together while an independent session survives',async({page,context,browser,admin})=>{
@@ -192,4 +192,39 @@ test('a rejected server follow-up is not replayed as a new task',async({page,adm
   await expect(page.locator('.streaming-cursor')).toHaveCount(0);
   await composer.fill('follow-up');await composer.press('Enter');await expect.poll(()=>followups).toBe(1);
   await expect(page.getByTestId('assistant-message').filter({hasText:'Follow-up denied'}).first()).toBeVisible();expect(creates).toBe(1);
+});
+test('between turns a paused server transport preserves the draft and blocks follow-up writes',async({page,admin})=>{
+  await page.addInitScript(()=>{class TurnStream {readyState=1;onopen:any=null;onmessage:any=null;onerror:any=null;constructor(url:string){if(url.includes('/runs/')){(window as any).__failTurn=()=>{this.readyState=2;this.onerror?.(new Event('error'));};setTimeout(()=>{this.onopen?.(new Event('open'));this.onmessage?.({data:JSON.stringify({seq:1,runId:'paused-turn',event:{type:'turn_end',stopReason:'end_turn'}})});},100);}}close(){this.readyState=2;}}Object.defineProperty(window,'EventSource',{value:TurnStream});});
+  let writes=0;await page.route('**/api/agents',r=>r.fulfill({json:{agents:[{id:'codex',name:'Codex',available:true,binary:'/test/codex',source:'path',version:'test',models:[],installUrl:''}]}}));await page.route('**/api/runs',r=>r.fulfill({json:r.request().method()==='POST'?{runId:'paused-turn'}:{runs:[]}}));await page.route('**/api/runs/paused-turn',r=>r.fulfill({json:{id:'paused-turn',status:'running'}}));await page.route('**/api/runs/paused-turn/messages',r=>{writes++;return r.fulfill({json:{}});});
+  await page.goto(`${admin.origin}/chat`);await login(page,admin);const composer=page.getByTestId('composer-input');await composer.fill('first');await composer.press('Enter');await expect(page.getByTestId('composer-stop')).toHaveCount(0);await expect(page.locator('.streaming-cursor')).toHaveCount(0);await composer.fill('keep this draft');await page.evaluate(()=>(window as any).__failTurn());
+  await expect(page.getByTestId('chat-transport-status')).toBeVisible();await expect(composer).toBeDisabled();await expect(composer).toHaveValue('keep this draft');expect(writes).toBe(0);
+  await page.getByTestId('chat-transport-retry').click();await expect(composer).toBeEnabled();await composer.press('Enter');await expect.poll(()=>writes).toBe(1);
+});
+test('knowledge subscription exhaustion has a visible recovery action',async({page,admin})=>{
+  await page.route('**/api/knowledge/vaults/*/events',r=>r.fulfill({status:204}));await page.goto(`${admin.origin}/knowledge`);await login(page,admin);
+  await expect(page.getByTestId('kb-transport-status')).toHaveAttribute('data-state','paused',{timeout:25000});
+  await page.unroute('**/api/knowledge/vaults/*/events');await page.getByTestId('kb-transport-retry').click();await expect(page.getByTestId('kb-transport-status')).toHaveCount(0);
+});
+test('pagehide masks private DOM and a persisted pageshow rechecks before restoration',async({page,admin})=>{
+  await page.goto(`${admin.origin}/settings`);await login(page,admin);
+  expect(await page.evaluate(()=>{window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}));const shell=document.querySelector<HTMLElement>('.admin-private-shell')!;return shell.hidden&&shell.inert;})).toBe(true);
+  const loaded=page.waitForEvent('load');await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})));await loaded;await expect(page.locator('.entry-shell')).toBeVisible();
+});
+test('a run completed during disconnect replays missing text before finishing',async({page,admin})=>{
+  let streams=0,creates=0;
+  await page.route('**/api/agents',r=>r.fulfill({json:{agents:[{id:'codex',name:'Codex',available:true,binary:'/test/codex',source:'path',version:'test',models:[],installUrl:''}]}}));
+  await page.route('**/api/runs',r=>{if(r.request().method()==='POST'){creates++;return r.fulfill({json:{runId:'tail-run'}});}return r.fulfill({json:{runs:[]}});});
+  await page.route('**/api/runs/tail-run',r=>r.fulfill({json:{id:'tail-run',status:'succeeded'}}));
+  await page.route('**/api/runs/tail-run/events*',r=>{streams++;const frames=streams===1?[{seq:1,runId:'tail-run',event:{type:'text_delta',delta:'Visible head '}}]:[{seq:2,runId:'tail-run',event:{type:'text_delta',delta:'and recovered tail.'}},{seq:3,runId:'tail-run',event:{type:'status',label:'completed'}}];return r.fulfill({contentType:'text/event-stream',body:frames.map(frame=>`data: ${JSON.stringify(frame)}\n\n`).join('')});});
+  await page.goto(`${admin.origin}/chat`);await login(page,admin);const composer=page.getByTestId('composer-input');await composer.fill('complete while disconnected');await composer.press('Enter');
+  await expect(page.getByTestId('assistant-message')).toContainText('Visible head and recovered tail.',{timeout:15000});await expect(page.getByTestId('composer-stop')).toHaveCount(0);expect(creates).toBe(1);expect(streams).toBeGreaterThanOrEqual(2);
+});
+test('verified terminal replay drains an already queued intent only after recovering its final text',async({page,admin})=>{
+  await page.addInitScript(()=>{class Stream {readyState=0;onopen:any=null;onmessage:any=null;onerror:any=null;constructor(url:string){setTimeout(()=>{this.readyState=1;this.onopen?.(new Event('open'));if(url.includes('final-queued'))this.onmessage?.({data:JSON.stringify({seq:1,runId:'final-queued',event:{type:'text_delta',delta:'Head '}})});},50);if(url.includes('final-queued'))(window as any).__finishQueued=()=>{this.readyState=2;this.onerror?.(new Event('error'));};}close(){this.readyState=2;}}Object.defineProperty(window,'EventSource',{value:Stream});});
+  let creates=0;await page.route('**/api/agents',r=>r.fulfill({json:{agents:[{id:'codex',name:'Codex',available:true,binary:'/test/codex',source:'path',version:'test',models:[],installUrl:''}]}}));await page.route('**/api/runs',r=>{if(r.request().method()==='POST'){creates++;return r.fulfill({json:{runId:creates===1?'final-queued':'next-run'}});}return r.fulfill({json:{runs:[]}});});await page.route('**/api/runs/final-queued',r=>r.fulfill({json:{id:'final-queued',status:'succeeded'}}));await page.route('**/api/runs/final-queued/events*',r=>r.fulfill({contentType:'text/event-stream',body:[{seq:2,runId:'final-queued',event:{type:'text_delta',delta:'recovered.'}},{seq:3,runId:'final-queued',event:{type:'status',label:'completed'}}].map(e=>`data: ${JSON.stringify(e)}\n\n`).join('')}));
+  await page.goto(`${admin.origin}/chat`);await login(page,admin);const composer=page.getByTestId('composer-input');await composer.fill('first');await composer.press('Enter');await expect.poll(()=>creates).toBe(1);await expect(composer).toBeEnabled();await composer.fill('next authorized queued message');await composer.press('Enter');await page.evaluate(()=>(window as any).__finishQueued());
+  await expect(page.getByTestId('assistant-message').first()).toContainText('Head recovered.');await expect.poll(()=>creates).toBe(2);
+});
+test('a production resource deep link survives administrator login and refresh',async({page,admin})=>{
+  const url=`${admin.origin}/resources/acceptance-item?from=deep#keep`;await page.goto(url);await login(page,admin);await expect(page).toHaveURL(url);await page.reload();await expect(page.locator('.entry-shell')).toBeVisible();await expect(page.getByTestId('admin-logout-btn')).toBeVisible();await expect(page).toHaveURL(url);
 });

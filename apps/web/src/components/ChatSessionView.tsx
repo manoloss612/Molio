@@ -227,7 +227,7 @@ export function ChatSessionView({
       isRunning={isRunning}
       onSend={handleSend}
       onCancel={onCancel}
-      disabled={composerDisabled}
+      disabled={composerDisabled || (!!transportState && transportState !== 'open' && transportState !== 'closed')}
       disabledPlaceholder={composerDisabledPlaceholder}
       initialFileRefs={composerInitialFileRefs}
       onOpenConversation={onOpenConversation}
@@ -334,7 +334,7 @@ export function ChatSessionView({
       <ActivityTree activity={activity ?? null} />
 
       {/* 进度状态条: 只在 run 运行时显示 */}
-      {transportState && transportState !== 'open' && transportState !== 'closed' && isRunning && <div className="admin-stream-notice" data-testid="chat-transport-status" role="status">
+      {transportState && transportState !== 'open' && transportState !== 'closed' && <div className="admin-stream-notice" data-testid="chat-transport-status" role="status">
         <span>{t(transportState === 'paused' ? 'adminAccess.streamPaused' : 'adminAccess.streamReconnecting')}</span>
         <button type="button" data-testid="chat-transport-retry" onClick={onRetryTransport} disabled={transportState === 'checking'}>{t('adminAccess.retryStream')}</button>
       </div>}

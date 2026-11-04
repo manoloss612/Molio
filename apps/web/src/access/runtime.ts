@@ -1,5 +1,5 @@
-import { createAccessController, type EndReason } from './session-controller';
-import { createSessionResources } from './resources';
+import { createAccessController, type EndReason } from './session-controller.ts';
+import { createSessionResources } from './resources.ts';
 
 const NOTICE = 'molio.admin.access.notice';
 export const REASON_KEY = 'molio.admin.access.reason';

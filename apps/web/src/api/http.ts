@@ -1,5 +1,12 @@
 import { AdminAccessError, type AccessController } from '../access/session-controller.ts';
 
+const responseSignals = new WeakMap<Response, AbortSignal>();
+export function getDaemonResponseSignal(response: Response): AbortSignal {
+  const signal = responseSignals.get(response);
+  if (!signal) throw new TypeError('Response was not created by daemonFetch');
+  return signal;
+}
+
 export function isDaemonApiUrl(input: string | URL, baseUrl = globalThis.location?.origin ?? 'http://localhost'): boolean {
   try { const url = new URL(input, baseUrl); return url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/api/'); } catch { return false; }
 }
@@ -16,10 +23,11 @@ export function createDaemonFetch(controller: AccessController, rawFetch: typeof
     signal.throwIfAborted();
     const headers = new Headers(init?.headers); headers.delete('x-molio-csrf');
     if (context.mode === 'server' && !['GET', 'HEAD', 'OPTIONS'].includes((init?.method ?? 'GET').toUpperCase())) headers.set('X-Molio-CSRF', context.csrfToken);
-    const response = await rawFetch(new URL(input, baseUrl), { ...init, signal, headers, credentials: 'same-origin', cache: 'no-store' });
+    const response = await rawFetch(new URL(input, baseUrl), { ...init, signal, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
     if (scope.closed) throw new AdminAccessError('session_ended');
     if (context.mode === 'server' && (response.status === 401 || response.status === 403)) await controller.revalidate('http-error');
     if (scope.closed || controller.getContext()?.resources !== scope) throw new AdminAccessError('session_ended');
+    responseSignals.set(response, signal);
     return response;
   };
 }

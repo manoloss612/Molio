@@ -81,3 +81,18 @@ test('HTTP-date Retry-After is parsed without retaining login input',async()=>{
   f.setHandler(async()=>f.json({error:'rate_limited'},429,{'Retry-After':new Date(retryAt).toUTCString()}));
   await assert.rejects(f.controller.login({username:'admin',password:'ephemeral'}),(err:any)=>err.retryAt===retryAt&&!JSON.stringify(err).includes('ephemeral'));
 });
+test('a peer notice supersedes a pending poll instead of adopting the pre-notice cookie response',async()=>{
+  const f=fixture();f.setSession(f.authenticated());await f.controller.revalidate('startup');let release!:(r:Response)=>void;let oldSignal:AbortSignal|undefined;let checks=0;
+  f.setHandler(async(_url,init)=>{checks++;if(checks===1){oldSignal=init?.signal??undefined;return new Promise(r=>{release=r;});}return f.json(f.authenticated('b'.repeat(64)));});
+  const old=f.controller.revalidate('poll');const peer=f.controller.revalidate('peer');
+  assert.equal(f.controller.getContext(),null);release(f.json(f.authenticated()));await Promise.all([old,peer]);
+  assert.equal(oldSignal?.aborted,true);assert.equal(checks,2);assert.deepEqual(f.retired,['session-changed']);
+});
+test('login confirmation cannot reuse a focus probe that began before the login response',async()=>{
+  const f=fixture();await f.controller.revalidate('startup');let releasePost!:(r:Response)=>void;let releaseOld!:(r:Response)=>void;let oldSignal:AbortSignal|undefined;let checks=0;
+  f.setHandler(async(url,init)=>{if(url.endsWith('/login'))return new Promise(r=>{releasePost=r;});checks++;if(checks===1){oldSignal=init?.signal??undefined;return new Promise(r=>{releaseOld=r;});}return f.json(f.authenticated());});
+  const login=f.controller.login({username:'admin',password:'temporary'});const result=login.catch(e=>e);
+  const old=f.controller.revalidate('focus');releasePost(f.json({authenticated:true}));await tick();
+  const canceled=oldSignal?.aborted;releaseOld(f.json({mode:'server',authenticated:false}));await old;const error=await result;
+  assert.equal(canceled,true);assert.equal(error,undefined);assert.equal(checks,2);assert.equal(f.controller.getContext()?.mode,'server');
+});
