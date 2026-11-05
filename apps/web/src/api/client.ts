@@ -1,3 +1,5 @@
+import { daemonFetch, getDaemonResponseSignal } from './http';
+import { consumeSseData } from './read-stream';
 import type {
   AgentInfo, InstallEvent, RunInfo, CreateRunRequest, ToolResultRequest,
   RewindResendRequest,
@@ -109,7 +111,7 @@ const BASE = '/api';
  * `if (!res.ok)` 分支漂移。
  */
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${BASE}/auth/${path}`, init);
+  const res = await daemonFetch(`${BASE}/auth/${path}`, init);
   if (!res.ok) throw await AuthApiError.from(res);
   return res;
 }
@@ -120,14 +122,14 @@ export const api = {
   // ─── Agents ───
 
   async listAgents(opts?: { refresh?: boolean }): Promise<AgentInfo[]> {
-    const res = await fetch(`${BASE}/agents${opts?.refresh ? '?refresh=1' : ''}`);
+    const res = await daemonFetch(`${BASE}/agents${opts?.refresh ? '?refresh=1' : ''}`);
     if (!res.ok) throw new Error(`Failed to fetch agents: ${res.status}`);
     const data = await res.json();
     return data.agents;
   },
 
   async testAgent(agentId: string): Promise<{ ok: boolean; elapsed: number; status?: string; error?: string }> {
-    const res = await fetch(`${BASE}/agents/${agentId}/test`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/agents/${agentId}/test`, { method: 'POST' });
     if (!res.ok) {
       const data = await res.json();
       return { ok: false, elapsed: data.elapsed ?? 0, error: data.error ?? `Test failed: ${res.status}` };
@@ -145,7 +147,7 @@ export const api = {
     onEvent: (event: InstallEvent) => void,
     signal?: AbortSignal,
   ): Promise<InstallEvent> {
-    const res = await fetch(`${BASE}/agents/${agentId}/install`, {
+    const res = await daemonFetch(`${BASE}/agents/${agentId}/install`, {
       method: 'POST',
       signal,
     });
@@ -161,42 +163,16 @@ export const api = {
       return errorEvent;
     }
 
-    const reader = res.body?.getReader();
-    if (!reader) {
-      const errorEvent: InstallEvent = {
-        type: 'error',
-        message: 'No response stream',
-        category: 'unknown',
-        retryable: false,
-      };
-      onEvent(errorEvent);
-      return errorEvent;
+    if (!res.body) {
+      const errorEvent: InstallEvent = { type: 'error', message: 'No response stream', category: 'unknown', retryable: false };
+      onEvent(errorEvent); return errorEvent;
     }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
     let lastEvent: InstallEvent = { type: 'log', message: '' };
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event: InstallEvent = JSON.parse(line.slice(6));
-            onEvent(event);
-            lastEvent = event;
-          } catch {
-            // Skip malformed SSE frames
-          }
-        }
-      }
-    }
+    await consumeSseData(res.body, getDaemonResponseSignal(res), data => {
+      let event: InstallEvent;
+      try { event = JSON.parse(data); } catch { return; }
+      onEvent(event); lastEvent = event;
+    });
 
     return lastEvent;
   },
@@ -204,7 +180,7 @@ export const api = {
   // ─── Runs ───
 
   async createRun(req: CreateRunRequest): Promise<{ runId: string; conversationId?: string }> {
-    const res = await fetch(`${BASE}/runs`, {
+    const res = await daemonFetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -217,24 +193,25 @@ export const api = {
   },
 
   async listRuns(): Promise<RunInfo[]> {
-    const res = await fetch(`${BASE}/runs`);
+    const res = await daemonFetch(`${BASE}/runs`);
     if (!res.ok) throw new Error(`Failed to fetch runs: ${res.status}`);
     const data = await res.json();
     return data.runs;
   },
 
   async getRun(runId: string): Promise<RunInfo> {
-    const res = await fetch(`${BASE}/runs/${runId}`);
+    const res = await daemonFetch(`${BASE}/runs/${runId}`);
     if (!res.ok) throw new Error(`Run not found: ${runId}`);
     return res.json();
   },
 
   async cancelRun(runId: string): Promise<void> {
-    await fetch(`${BASE}/runs/${runId}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/runs/${runId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`Failed to cancel run: ${res.status}`);
   },
 
   async sendMessage(runId: string, message: string): Promise<void> {
-    const res = await fetch(`${BASE}/runs/${runId}/messages`, {
+    const res = await daemonFetch(`${BASE}/runs/${runId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message }),
@@ -246,7 +223,7 @@ export const api = {
   },
 
   async submitToolResult(runId: string, req: ToolResultRequest): Promise<void> {
-    const res = await fetch(`${BASE}/runs/${runId}/tool-result`, {
+    const res = await daemonFetch(`${BASE}/runs/${runId}/tool-result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -260,14 +237,14 @@ export const api = {
   // ─── Projects ───
 
   async listProjects(): Promise<Project[]> {
-    const res = await fetch(`${BASE}/projects`);
+    const res = await daemonFetch(`${BASE}/projects`);
     if (!res.ok) throw new Error(`Failed to fetch projects: ${res.status}`);
     const data = await res.json();
     return data.projects;
   },
 
   async createProject(name: string): Promise<Project> {
-    const res = await fetch(`${BASE}/projects`, {
+    const res = await daemonFetch(`${BASE}/projects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
@@ -277,20 +254,21 @@ export const api = {
   },
 
   async deleteProject(id: string): Promise<void> {
-    await fetch(`${BASE}/projects/${id}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/projects/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`Failed to delete project: ${res.status}`);
   },
 
   // ─── Conversations ───
 
   async listConversations(projectId: string): Promise<Conversation[]> {
-    const res = await fetch(`${BASE}/projects/${projectId}/conversations`);
+    const res = await daemonFetch(`${BASE}/projects/${projectId}/conversations`);
     if (!res.ok) throw new Error(`Failed to fetch conversations: ${res.status}`);
     const data = await res.json();
     return data.conversations;
   },
 
   async createConversation(projectId: string, title?: string): Promise<Conversation> {
-    const res = await fetch(`${BASE}/projects/${projectId}/conversations`, {
+    const res = await daemonFetch(`${BASE}/projects/${projectId}/conversations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title }),
@@ -300,22 +278,23 @@ export const api = {
   },
 
   async deleteConversation(projectId: string, conversationId: string): Promise<void> {
-    await fetch(`${BASE}/projects/${projectId}/conversations/${conversationId}`, {
+    const res = await daemonFetch(`${BASE}/projects/${projectId}/conversations/${conversationId}`, {
       method: 'DELETE',
     });
+    if (!res.ok) throw new Error(`Failed to delete conversation: ${res.status}`);
   },
 
   // ─── Messages ───
 
   async listMessages(projectId: string, conversationId: string): Promise<ChatMessage[]> {
-    const res = await fetch(`${BASE}/projects/${projectId}/conversations/${conversationId}/messages`);
+    const res = await daemonFetch(`${BASE}/projects/${projectId}/conversations/${conversationId}/messages`);
     if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`);
     const data = await res.json();
     return data.messages;
   },
 
   async saveMessage(projectId: string, conversationId: string, message: ChatMessage): Promise<void> {
-    const res = await fetch(
+    const res = await daemonFetch(
       `${BASE}/projects/${projectId}/conversations/${conversationId}/messages/${message.id}`,
       {
         method: 'PUT',
@@ -329,13 +308,13 @@ export const api = {
   // ─── Config ───
 
   async getConfig(): Promise<Record<string, unknown>> {
-    const res = await fetch(`${BASE}/config`);
+    const res = await daemonFetch(`${BASE}/config`);
     if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`);
     return res.json();
   },
 
   async updateConfig(config: Record<string, unknown>): Promise<void> {
-    const res = await fetch(`${BASE}/config`, {
+    const res = await daemonFetch(`${BASE}/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
@@ -344,13 +323,13 @@ export const api = {
   },
 
   async getAgentConfig(agentId: string): Promise<Record<string, unknown>> {
-    const res = await fetch(`${BASE}/config/agents/${agentId}`);
+    const res = await daemonFetch(`${BASE}/config/agents/${agentId}`);
     if (!res.ok) throw new Error(`Failed to fetch agent config: ${res.status}`);
     return res.json();
   },
 
   async updateAgentConfig(agentId: string, config: Record<string, unknown>): Promise<void> {
-    const res = await fetch(`${BASE}/config/agents/${agentId}`, {
+    const res = await daemonFetch(`${BASE}/config/agents/${agentId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
@@ -359,13 +338,13 @@ export const api = {
   },
 
   async getAgentProvider(agentId: string): Promise<Record<string, unknown>> {
-    const res = await fetch(`${BASE}/agents/${agentId}/provider`);
+    const res = await daemonFetch(`${BASE}/agents/${agentId}/provider`);
     if (!res.ok) throw new Error(`Failed to fetch agent provider: ${res.status}`);
     return res.json();
   },
 
   async updateAgentProvider(agentId: string, config: Record<string, unknown>): Promise<void> {
-    const res = await fetch(`${BASE}/agents/${agentId}/provider`, {
+    const res = await daemonFetch(`${BASE}/agents/${agentId}/provider`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
@@ -381,26 +360,26 @@ export const api = {
     if (opts?.before != null) params.set('before', String(opts.before));
     if (opts?.limit != null) params.set('limit', String(opts.limit));
     const qs = params.toString();
-    const res = await fetch(`${BASE}/conversations${qs ? `?${qs}` : ''}`);
+    const res = await daemonFetch(`${BASE}/conversations${qs ? `?${qs}` : ''}`);
     if (!res.ok) throw new Error(`Failed to fetch conversation history: ${res.status}`);
     return res.json();
   },
 
   async getConversation(conversationId: string): Promise<Conversation> {
-    const res = await fetch(`${BASE}/conversations/${conversationId}`);
+    const res = await daemonFetch(`${BASE}/conversations/${conversationId}`);
     if (!res.ok) throw new Error(`Failed to fetch conversation: ${res.status}`);
     return res.json();
   },
 
   async listConversationMessages(conversationId: string): Promise<ChatMessage[]> {
-    const res = await fetch(`${BASE}/conversations/${conversationId}/messages`);
+    const res = await daemonFetch(`${BASE}/conversations/${conversationId}/messages`);
     if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`);
     const data = await res.json();
     return data.messages;
   },
 
   async deleteConversationById(conversationId: string): Promise<void> {
-    const res = await fetch(`${BASE}/conversations/${conversationId}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/conversations/${conversationId}`, { method: 'DELETE' });
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       throw new Error(err?.error?.message ?? `Failed to delete conversation: ${res.status}`);
@@ -408,7 +387,7 @@ export const api = {
   },
 
   async deleteConversationsByIds(ids: string[]): Promise<{ deleted: number }> {
-    const res = await fetch(`${BASE}/conversations/batch-delete`, {
+    const res = await daemonFetch(`${BASE}/conversations/batch-delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
@@ -424,7 +403,7 @@ export const api = {
     conversationId: string,
     patch: { title?: string; pinned?: boolean },
   ): Promise<Conversation> {
-    const res = await fetch(`${BASE}/conversations/${conversationId}`, {
+    const res = await daemonFetch(`${BASE}/conversations/${conversationId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -437,7 +416,7 @@ export const api = {
   },
 
   async rewindResend(conversationId: string, req: RewindResendRequest): Promise<{ runId: string; conversationId: string }> {
-    const res = await fetch(`${BASE}/conversations/${conversationId}/rewind-resend`, {
+    const res = await daemonFetch(`${BASE}/conversations/${conversationId}/rewind-resend`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -450,7 +429,7 @@ export const api = {
   },
 
   async deleteMessages(conversationId: string, ids: string[]): Promise<{ deleted: number }> {
-    const res = await fetch(`${BASE}/conversations/${conversationId}/delete-messages`, {
+    const res = await daemonFetch(`${BASE}/conversations/${conversationId}/delete-messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
@@ -465,19 +444,19 @@ export const api = {
   // ─── Weixin ClawBot ───
 
   async getWeixinStatus(): Promise<WeixinStatus> {
-    const res = await fetch(`${BASE}/weixin/status`);
+    const res = await daemonFetch(`${BASE}/weixin/status`);
     if (!res.ok) throw new Error(`Failed to fetch Weixin status: ${res.status}`);
     return res.json();
   },
 
   async beginWeixinLogin(): Promise<WeixinStatus> {
-    const res = await fetch(`${BASE}/weixin/login`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/weixin/login`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to start Weixin login: ${res.status}`);
     return res.json();
   },
 
   async updateWeixinConfig(config: WeixinConfig): Promise<WeixinStatus> {
-    const res = await fetch(`${BASE}/weixin/config`, {
+    const res = await daemonFetch(`${BASE}/weixin/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
@@ -487,7 +466,7 @@ export const api = {
   },
 
   async disconnectWeixin(): Promise<WeixinStatus> {
-    const res = await fetch(`${BASE}/weixin/disconnect`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/weixin/disconnect`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to disconnect Weixin: ${res.status}`);
     return res.json();
   },
@@ -495,13 +474,13 @@ export const api = {
   // ─── Feishu 自建应用 ───
 
   async getFeishuStatus(): Promise<FeishuStatus> {
-    const res = await fetch(`${BASE}/feishu/status`);
+    const res = await daemonFetch(`${BASE}/feishu/status`);
     if (!res.ok) throw new Error(`Failed to fetch Feishu status: ${res.status}`);
     return res.json();
   },
 
   async updateFeishuConfig(config: FeishuConfig): Promise<FeishuStatus> {
-    const res = await fetch(`${BASE}/feishu/config`, {
+    const res = await daemonFetch(`${BASE}/feishu/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
@@ -511,19 +490,19 @@ export const api = {
   },
 
   async startFeishu(): Promise<FeishuStatus> {
-    const res = await fetch(`${BASE}/feishu/start`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/feishu/start`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to start Feishu: ${res.status}`);
     return res.json();
   },
 
   async stopFeishu(): Promise<FeishuStatus> {
-    const res = await fetch(`${BASE}/feishu/stop`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/feishu/stop`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to stop Feishu: ${res.status}`);
     return res.json();
   },
 
   async disconnectFeishu(): Promise<FeishuStatus> {
-    const res = await fetch(`${BASE}/feishu/disconnect`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/feishu/disconnect`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to disconnect Feishu: ${res.status}`);
     return res.json();
   },
@@ -578,7 +557,7 @@ export const api = {
   // ─── Knowledge Base ───
 
   async listVaults(): Promise<Vault[]> {
-    const res = await fetch(`${BASE}/knowledge/vaults`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults`);
     if (!res.ok) throw new Error(`Failed to fetch vaults: ${res.status}`);
     const data = await res.json();
     return data.vaults;
@@ -586,14 +565,14 @@ export const api = {
 
   /** 获取 vault 一级目录列表（发布页目录选择用；排除隐藏目录，.molio 除外） */
   async getTopDirs(vaultId: string): Promise<string[]> {
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/top-dirs`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/top-dirs`);
     if (!res.ok) throw new Error(`Failed to fetch top dirs: ${res.status}`);
     const data = await res.json();
     return data.dirs as string[];
   },
 
   async createVault(req: CreateVaultRequest): Promise<Vault> {
-    const res = await fetch(`${BASE}/knowledge/vaults`, {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -610,7 +589,7 @@ export const api = {
    * Idempotent: returns the existing vault with `created: false` on repeat.
    */
   async createSampleVault(): Promise<SampleVaultResponse> {
-    const res = await fetch(`${BASE}/knowledge/sample-vault`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/knowledge/sample-vault`, { method: 'POST' });
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       throw new Error(err?.error?.message ?? `Failed to create sample vault: ${res.status}`);
@@ -619,19 +598,20 @@ export const api = {
   },
 
   async deleteVault(id: string): Promise<void> {
-    await fetch(`${BASE}/knowledge/vaults/${id}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`Failed to delete vault: ${res.status}`);
   },
 
   /** Returns the user's currently-active vault (the one external clippers target). */
   async getActiveVault(): Promise<{ vaultId: string | null; vault: (Vault & { fileCount: number }) | null }> {
-    const res = await fetch(`${BASE}/knowledge/active-vault`);
+    const res = await daemonFetch(`${BASE}/knowledge/active-vault`);
     if (!res.ok) throw new Error(`Failed to fetch active vault: ${res.status}`);
     return res.json();
   },
 
   /** Set the active vault. Pass null to clear. Fire-and-forget safe. */
   async setActiveVault(id: string | null): Promise<void> {
-    const res = await fetch(`${BASE}/knowledge/active-vault`, {
+    const res = await daemonFetch(`${BASE}/knowledge/active-vault`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
@@ -640,7 +620,7 @@ export const api = {
   },
 
   async getFileTree(vaultId: string): Promise<TreeNode[]> {
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/tree`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/tree`);
     if (!res.ok) throw new Error(`Failed to fetch file tree: ${res.status}`);
     const data = await res.json();
     return data.tree;
@@ -649,7 +629,7 @@ export const api = {
   async readFile(vaultId: string, filePath: string, opts?: { force?: boolean }): Promise<FileContent> {
     const encoded = encodeURIComponent(filePath);
     const query = opts?.force ? '?force=1' : '';
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}${query}`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}${query}`);
     if (!res.ok) throw new Error(`Failed to read file: ${res.status}`);
     return res.json();
   },
@@ -663,7 +643,7 @@ export const api = {
    */
   async resolveFilePath(vaultId: string, filePath: string): Promise<string | null> {
     const encoded = encodeURIComponent(filePath);
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/resolve/${encoded}`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/resolve/${encoded}`);
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Failed to resolve file path: ${res.status}`);
     const data = await res.json();
@@ -678,7 +658,7 @@ export const api = {
 
   async writeFile(vaultId: string, filePath: string, content: string): Promise<void> {
     const encoded = encodeURIComponent(filePath);
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}`, {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
@@ -688,7 +668,7 @@ export const api = {
 
   /** Persist a submitted quiz's per-question attempts (batch). */
   async saveQuizAttempts(payload: SaveQuizAttemptsRequest): Promise<void> {
-    const res = await fetch(`${BASE}/quiz/attempts`, {
+    const res = await daemonFetch(`${BASE}/quiz/attempts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -701,7 +681,7 @@ export const api = {
     const formData = new FormData();
     formData.append('file', file);
 
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/assets/upload`, {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/assets/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -734,7 +714,7 @@ export const api = {
     }
     formData.append('conflict', conflict);
 
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/import`, {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/import`, {
       method: 'POST',
       body: formData,
     });
@@ -748,7 +728,7 @@ export const api = {
 
   async deleteFile(vaultId: string, filePath: string): Promise<void> {
     const encoded = encodeURIComponent(filePath);
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}`, { method: 'DELETE' });
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       throw new Error(err?.error?.message ?? `Failed to delete file: ${res.status}`);
@@ -757,7 +737,7 @@ export const api = {
 
   async renameFile(vaultId: string, oldPath: string, newPath: string): Promise<void> {
     const encoded = encodeURIComponent(oldPath);
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}`, {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/files/${encoded}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ newPath }),
@@ -770,7 +750,7 @@ export const api = {
 
   async createDirectory(vaultId: string, dirPath: string): Promise<void> {
     const encoded = encodeURIComponent(dirPath);
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/dirs/${encoded}`, {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/dirs/${encoded}`, {
       method: 'POST',
     });
     if (!res.ok) throw new Error(`Failed to create directory: ${res.status}`);
@@ -778,7 +758,7 @@ export const api = {
 
   async deleteDirectory(vaultId: string, dirPath: string): Promise<void> {
     const encoded = encodeURIComponent(dirPath);
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/dirs/${encoded}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/dirs/${encoded}`, { method: 'DELETE' });
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       throw new Error(err?.error?.message ?? `Failed to delete directory: ${res.status}`);
@@ -786,14 +766,14 @@ export const api = {
   },
 
   async getKbHistory(vaultId: string, limit = 50): Promise<KbHistoryEntry[]> {
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/history?limit=${limit}`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/history?limit=${limit}`);
     if (!res.ok) throw new Error(`Failed to fetch history: ${res.status}`);
     const data = await res.json();
     return data.history;
   },
 
   async searchFiles(vaultId: string, query: string, limit = 20): Promise<SearchResponse> {
-    const res = await fetch(
+    const res = await daemonFetch(
       `${BASE}/knowledge/vaults/${vaultId}/search?q=${encodeURIComponent(query)}&limit=${limit}`,
     );
     if (!res.ok) throw new Error(`Failed to search: ${res.status}`);
@@ -803,7 +783,7 @@ export const api = {
   // ─── Wiki ───
 
   async getWikiStatus(vaultId: string): Promise<WikiStatusResponse> {
-    const res = await fetch(`${BASE}/knowledge/vaults/${vaultId}/wiki/status`);
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/wiki/status`);
     if (!res.ok) throw new Error(`Failed to fetch wiki status: ${res.status}`);
     return res.json();
   },
@@ -811,7 +791,7 @@ export const api = {
   // ─── Publish ───
 
   async checkCose(): Promise<{ installed: boolean }> {
-    const res = await fetch(`${BASE}/publish/check-cose`, { method: 'POST' });
+    const res = await daemonFetch(`${BASE}/publish/check-cose`, { method: 'POST' });
     if (!res.ok) throw new Error(`Failed to check COSE: ${res.status}`);
     return res.json();
   },
@@ -822,7 +802,7 @@ export const api = {
     html: string;
     css: string;
   }): Promise<{ bridgeUrl: string }> {
-    const res = await fetch(`${BASE}/publish/start`, {
+    const res = await daemonFetch(`${BASE}/publish/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -837,7 +817,7 @@ export const api = {
   // ─── Preload ───
 
   async getPreloadStatus(): Promise<Record<string, { status: string; progress?: number; message?: string; error?: string }>> {
-    const res = await fetch(`${BASE}/preload/status`);
+    const res = await daemonFetch(`${BASE}/preload/status`);
     if (!res.ok) throw new Error(`Failed to fetch preload status: ${res.status}`);
     const data = await res.json();
     return data.statuses;
@@ -852,7 +832,7 @@ export const api = {
     onProgress: (event: { skill: string; status: string; progress: number; message: string }) => void,
     signal?: AbortSignal,
   ): Promise<void> {
-    const res = await fetch(`${BASE}/preload/start`, {
+    const res = await daemonFetch(`${BASE}/preload/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ skills }),
@@ -863,37 +843,17 @@ export const api = {
       throw new Error(err.error ?? `Preload start failed: ${res.status}`);
     }
 
-    const reader = res.body?.getReader();
-    if (!reader) {
-      throw new Error('No response stream');
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(line.slice(6));
-            onProgress(event);
-          } catch {
-            // Skip malformed
-          }
-        }
-      }
-    }
+    if (!res.body) throw new Error('No response stream');
+    await consumeSseData(res.body, getDaemonResponseSignal(res), data => {
+      let event: { skill: string; status: string; progress: number; message: string };
+      try { event = JSON.parse(data); } catch { return; }
+      onProgress(event);
+    });
   },
 
+
   async dismissPreload(skills: string[]): Promise<void> {
-    const res = await fetch(`${BASE}/preload/dismiss`, {
+    const res = await daemonFetch(`${BASE}/preload/dismiss`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ skills }),
@@ -902,7 +862,7 @@ export const api = {
   },
 
   async undismissPreload(skills: string[]): Promise<void> {
-    const res = await fetch(`${BASE}/preload/undismiss`, {
+    const res = await daemonFetch(`${BASE}/preload/undismiss`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ skills }),
@@ -912,7 +872,7 @@ export const api = {
 
   /** Pause in-progress preloads, keeping partial artifacts for resume. */
   async pausePreload(skills: string[]): Promise<void> {
-    const res = await fetch(`${BASE}/preload/pause`, {
+    const res = await daemonFetch(`${BASE}/preload/pause`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ skills }),
@@ -922,7 +882,7 @@ export const api = {
 
   /** Stop preloads AND delete partial artifacts (clean reset to missing). */
   async stopPreload(skills: string[]): Promise<void> {
-    const res = await fetch(`${BASE}/preload/stop`, {
+    const res = await daemonFetch(`${BASE}/preload/stop`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ skills }),
@@ -933,7 +893,7 @@ export const api = {
   // ─── Graph ───
 
   async getGraph(vaultId: string): Promise<GraphData> {
-    const res = await fetch(`${BASE}/graph/${vaultId}`);
+    const res = await daemonFetch(`${BASE}/graph/${vaultId}`);
     if (!res.ok) throw new Error(`Failed to fetch graph: ${res.status}`);
     return res.json();
   },
@@ -942,7 +902,7 @@ export const api = {
   async getLocalGraph(vaultId: string, scope: GraphScope): Promise<GraphData & { focusNodes: string[] }> {
     const params = new URLSearchParams({ scope: scope.type, path: scope.path });
     if (scope.type === 'file' && scope.depth != null) params.set('depth', String(scope.depth));
-    const res = await fetch(`${BASE}/graph/${vaultId}/local?${params.toString()}`);
+    const res = await daemonFetch(`${BASE}/graph/${vaultId}/local?${params.toString()}`);
     if (!res.ok) throw new Error(`Failed to fetch local graph: ${res.status}`);
     return res.json();
   },
@@ -953,7 +913,7 @@ export const api = {
     // includeBundled surfaces app-shipped skills READ-ONLY (composer "/"
     // palette); the settings UI omits it and keeps them hidden.
     const qs = opts?.includeBundled ? '?includeBundled=1' : '';
-    const res = await fetch(`${BASE}/skills${qs}`);
+    const res = await daemonFetch(`${BASE}/skills${qs}`);
     if (!res.ok) throw new Error(`Failed to fetch skills: ${res.status}`);
     const data = await res.json();
     return data.skills;
@@ -961,7 +921,7 @@ export const api = {
 
   /** Fetch one skill with its instructions body (for the edit form). */
   async getSkill(id: string): Promise<SkillDetailResponse> {
-    const res = await fetch(`${BASE}/skills/${id}`);
+    const res = await daemonFetch(`${BASE}/skills/${id}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to fetch skill: ${res.status}`);
@@ -970,7 +930,7 @@ export const api = {
   },
 
   async createSkill(req: CreateSkillRequest): Promise<SkillManifestEntry> {
-    const res = await fetch(`${BASE}/skills`, {
+    const res = await daemonFetch(`${BASE}/skills`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -984,7 +944,7 @@ export const api = {
   },
 
   async updateSkill(id: string, req: UpdateSkillRequest): Promise<SkillManifestEntry> {
-    const res = await fetch(`${BASE}/skills/${id}`, {
+    const res = await daemonFetch(`${BASE}/skills/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -998,7 +958,7 @@ export const api = {
   },
 
   async toggleSkill(id: string, enabled: boolean): Promise<SkillManifestEntry> {
-    const res = await fetch(`${BASE}/skills/${id}/toggle`, {
+    const res = await daemonFetch(`${BASE}/skills/${id}/toggle`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
@@ -1012,7 +972,7 @@ export const api = {
   },
 
   async deleteSkill(id: string): Promise<void> {
-    const res = await fetch(`${BASE}/skills/${id}`, { method: 'DELETE' });
+    const res = await daemonFetch(`${BASE}/skills/${id}`, { method: 'DELETE' });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to delete skill: ${res.status}`);
@@ -1021,7 +981,7 @@ export const api = {
 
   /** Stateless pre-import inspection (POST /api/skills/preview-import). */
   async previewSkillImport(req: ImportSkillRequest): Promise<SkillImportPreviewResponse> {
-    const res = await fetch(`${BASE}/skills/preview-import`, {
+    const res = await daemonFetch(`${BASE}/skills/preview-import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -1035,7 +995,7 @@ export const api = {
 
   /** Content-dir listing of a library skill (GET /api/skills/:id/files). */
   async listSkillFiles(id: string): Promise<{ dir: string; files: { path: string; size: number }[]; truncated: boolean }> {
-    const res = await fetch(`${BASE}/skills/${id}/files`);
+    const res = await daemonFetch(`${BASE}/skills/${id}/files`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to list skill files: ${res.status}`);
@@ -1044,7 +1004,7 @@ export const api = {
   },
 
   async importSkill(req: ImportSkillRequest): Promise<SkillManifestEntry> {
-    const res = await fetch(`${BASE}/skills/import`, {
+    const res = await daemonFetch(`${BASE}/skills/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
@@ -1059,7 +1019,7 @@ export const api = {
 
   /** One-shot AI call to prefill a skill form. Always resolves (fallback flag set on failure). */
   async prefillSkill(content: string): Promise<PrefillResult> {
-    const res = await fetch(`${BASE}/skills/prefill`, {
+    const res = await daemonFetch(`${BASE}/skills/prefill`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
@@ -1083,7 +1043,7 @@ export const api = {
     if (query.category?.trim()) params.set('category', query.category.trim());
     if (query.sort && query.sort !== 'default') params.set('sort', query.sort);
     const qs = params.toString();
-    const res = await fetch(`${BASE}/skills/hub/skills${qs ? `?${qs}` : ''}`);
+    const res = await daemonFetch(`${BASE}/skills/hub/skills${qs ? `?${qs}` : ''}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to fetch hub skills: ${res.status}`);
@@ -1095,7 +1055,7 @@ export const api = {
   async hubSkillDetail(query: HubSkillDetailQuery): Promise<HubSkillDetailResponse> {
     const params = new URLSearchParams({ slug: query.slug });
     if (query.namespace?.trim()) params.set('namespace', query.namespace.trim());
-    const res = await fetch(`${BASE}/skills/hub/skill?${params.toString()}`);
+    const res = await daemonFetch(`${BASE}/skills/hub/skill?${params.toString()}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to fetch hub skill detail: ${res.status}`);
@@ -1104,7 +1064,7 @@ export const api = {
   },
 
   async hubCategories(): Promise<HubCategoriesResponse> {
-    const res = await fetch(`${BASE}/skills/hub/categories`);
+    const res = await daemonFetch(`${BASE}/skills/hub/categories`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to fetch hub categories: ${res.status}`);
@@ -1114,7 +1074,7 @@ export const api = {
 
   /** Install (or refresh) a hub skill; the daemon downloads and imports it. */
   async installHubSkill(req: InstallHubSkillRequest): Promise<InstallHubSkillResponse> {
-    const res = await fetch(`${BASE}/skills/hub/install`, {
+    const res = await daemonFetch(`${BASE}/skills/hub/install`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
