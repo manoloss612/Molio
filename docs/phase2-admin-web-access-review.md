@@ -143,4 +143,8 @@ MOLIO_ACCESS_MODE=local MOLIO_E2E_REUSE_SERVERS=0 MOLIO_E2E_DAEMON_PORT=3100 MOL
 - 正常向 `demo-session.json` 的当前 demo PID 发 SIGTERM 会停止其 daemon/proxy 并删除它自己创建的临时目录；不会删除用户原知识库。开发服务及报告是独立进程。
 - 当前会话 CUA 返回 `iab` 不可用且浏览器列表为空，无法自动打开可见标签页；服务与截图均已验证，请通过链接打开。浏览器自签名证书警告须由用户自行处理，没有修改系统信任设置。
 
+## 独立验收复核补记
+
+2026-11-06 按照独立验收意见修正了“旧退出意图不能撤销新 Cookie 会话”用例。该用例重复 3 次通过，管理员 HTTPS 定向套件 33/33 通过。之后完整 Web E2E 为 648 通过、1 跳过、1 失败、0 flaky；失败发生在未修改的浮动聊天拖拽用例，单独重复 3 次通过。全量运行另记录 3 次 daemon `ReadableStream is already closed` uncaughtException 日志。完整运行因此**不记为全绿**。细节、命令和产物位置见[独立验收复核补记](2026-11-06-phase2-admin-web-access-acceptance-followup.md)。
+
 原目录的 HANDOFF.md、计划草稿及用户修改保持原样；本期代码保留在 `/home/ss/.codex/worktrees/phase2-admin-web/molio` 的 `feat/admin-web-access`。未推送、未合并、未部署到生产。

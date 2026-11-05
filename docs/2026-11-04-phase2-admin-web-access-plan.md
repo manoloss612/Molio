@@ -233,4 +233,12 @@ MOLIO_ACCESS_MODE=local MOLIO_E2E_REUSE_SERVERS=0 MOLIO_E2E_DAEMON_PORT=3100 MOL
 - 原 checkout local 服务已恢复，隔离 HTTPS 演示/报告已启动且经过实际登录退出/草稿 smoke。自动打开可见标签页因当前无浏览器连接不可执行，交付 URL 和截图供用户打开；没有绕过浏览器证书警告。
 - 当前仅保留本地分支供验收，没有推送、合并或生产部署。原 HANDOFF.md 及用户文件保留。
 
+## 独立验收补记（2026-11-06）
+
+- [x] 修复 `admin-access-ui.spec.ts` 旧退出意图竞态断言；单例重复 3 次通过，管理员 HTTPS 定向套件 33/33 通过。
+- [x] 按报告建议重跑完整 Web E2E：650 项中 648 通过、1 跳过、1 间歇失败、0 flaky。唯一失败为未改动的 floating-chat 拖拽用例；单独重复 3 次通过。完整结果退出码 1，不能标注为全绿。
+- [x] 记录全量期间 3 次 daemon `ReadableStream is already closed` uncaughtException 日志；进程继续响应，需作为独立问题定位。
+- [x] 原 checkout 的 local 服务在测试后恢复；health 200，access session 为 `local/authenticated=false`。
+- [x] 详细结果与证据见 [独立验收复核补记](2026-11-06-phase2-admin-web-access-acceptance-followup.md)。
+
 所有执行项的证据、具体命令、失败定位与 11 项执行裁决见 [第二期审核指南](phase2-admin-web-access-review.md) 及本机 `.artifacts/phase2-admin-access/`。

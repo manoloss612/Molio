@@ -100,11 +100,20 @@ test('server-side expiry removes private DOM and leaves saved files intact',asyn
   expect(await page.evaluate(async()=>(await fetch('/api/config')).status)).toBe(401);expect(readFileSync(join(admin.vaultDir,'acceptance.md'),'utf8')).toContain('Original saved text');
 });
 test('an old logout intent cannot revoke a newer cookie session',async({page,admin})=>{
-  await page.goto(`${admin.origin}/settings`);await login(page,admin);
+  await page.goto(`${admin.origin}/settings`);
+  await login(page,admin);
+  await page.locator('[data-testid="admin-logout-btn"]').click();
+  await expect(page.locator('[data-testid="admin-logout-confirm"]')).toBeVisible();
+  const reloaded=page.waitForEvent('framenavigated',frame=>frame===page.mainFrame()).then(()=>({kind:'reload' as const}));
   expect(await page.evaluate(async credentials=>(await fetch('/api/access/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(credentials)})).status,{username:admin.username,password:admin.password})).toBe(200);
-  // No peer notification is sent by this raw login: the old page still holds the old CSRF.
-  await page.locator('[data-testid="admin-logout-btn"]').click();const rejected=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/access/logout');await page.locator('[data-testid="admin-logout-confirm"]').click();expect((await rejected).status()).toBe(403);
-  await expect(page.locator('.entry-shell')).toBeVisible();expect(await page.evaluate(async()=>(await (await fetch('/api/access/session')).json()).authenticated)).toBe(true);
+  // The stale dialog may submit first (403) or a concurrent stale-CSRF write
+  // may trigger the designed session-change reload before the click lands.
+  const rejected=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/access/logout').then(response=>({kind:'logout' as const,response}));
+  await page.locator('[data-testid="admin-logout-confirm"]').click({timeout:2000}).catch(()=>{});
+  const outcome=await Promise.race([reloaded,rejected]);
+  if(outcome.kind==='logout')expect(outcome.response.status()).toBe(403);
+  await expect(page.locator('.entry-shell')).toBeVisible();
+  expect(await page.evaluate(async()=>(await (await fetch('/api/access/session')).json()).authenticated)).toBe(true);
 });
 test('real multipart upload keeps the browser boundary and imported bytes',async({page,admin})=>{
   await page.goto(`${admin.origin}/knowledge`);await login(page,admin);
