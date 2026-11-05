@@ -43,3 +43,7 @@ pnpm --filter @molio/web exec playwright test -c playwright.admin.config.ts e2e/
 ## 验收边界
 
 本次报告针对的管理员竞态已复跑稳定，管理员定向门禁全绿。完整 Web 回归出现上述一个无关间歇失败和 daemon 流异常记录，因此不能把完整回归标为“全部通过”。未修改浮动聊天或 daemon 流代码，避免在缺少可复现证据时扩大改动范围。
+
+## GitHub 备份状态
+
+2026-11-06 已推送分支 `feat/admin-web-access` 到用户 fork，并创建以 `codex/phase1-admin-access-backup` 为 base 的 [Draft PR #2](https://github.com/manoloss612/Molio/pull/2)。PR 为 OPEN/Draft，GitHub 当时显示 `MERGEABLE`，没有 CI 检查记录；该状态只说明 GitHub 未报告分支冲突，不代表完整测试全绿。没有合并或生产部署。
