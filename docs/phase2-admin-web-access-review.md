@@ -147,4 +147,4 @@ MOLIO_ACCESS_MODE=local MOLIO_E2E_REUSE_SERVERS=0 MOLIO_E2E_DAEMON_PORT=3100 MOL
 
 2026-11-06 按照独立验收意见修正了“旧退出意图不能撤销新 Cookie 会话”用例。该用例重复 3 次通过，管理员 HTTPS 定向套件 33/33 通过。之后完整 Web E2E 为 648 通过、1 跳过、1 失败、0 flaky；失败发生在未修改的浮动聊天拖拽用例，单独重复 3 次通过。全量运行另记录 3 次 daemon `ReadableStream is already closed` uncaughtException 日志。完整运行因此**不记为全绿**。细节、命令和产物位置见[独立验收复核补记](2026-11-06-phase2-admin-web-access-acceptance-followup.md)。
 
-原目录的 HANDOFF.md、计划草稿及用户修改保持原样；本期代码保留在 `/home/ss/.codex/worktrees/phase2-admin-web/molio` 的 `feat/admin-web-access`。未推送、未合并、未部署到生产。
+原目录的 HANDOFF.md、计划草稿及用户修改保持原样。本期代码保留在 `/home/ss/.codex/worktrees/phase2-admin-web/molio` 的 `feat/admin-web-access`。2026-11-06 已推送到用户 fork 的同名备份分支，并创建以一期备份分支为 base 的 [Draft PR #2](https://github.com/manoloss612/Molio/pull/2)；尚未合并，也未部署到生产。
