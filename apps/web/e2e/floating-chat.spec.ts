@@ -65,6 +65,22 @@ test.describe('Floating chat (方案 D)', () => {
     await expect(page.locator('[data-testid="floating-chat-btn"]')).toHaveCount(1);
   });
 
+  test('收起面板的点击不会误触刚重现的悬浮按钮', async ({ page }) => {
+    await mockChatRun(page);
+    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
+    await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 5_000 });
+    const btn = page.locator('[data-testid="floating-chat-btn"]');
+    const panel = page.locator('[data-testid="kb-chat-panel"]');
+    await btn.click();
+    await expect(panel).toBeVisible();
+    await page.locator('[data-testid="kb-chat-close"]').click();
+    await expect(panel).toHaveClass(/--closed/);
+    await expect(btn).toBeVisible();
+    // Allow any trailing click from the close action to reach its final target.
+    await page.waitForTimeout(100);
+    await expect(panel).toHaveClass(/--closed/);
+  });
+
   test('KB 页内 💬问答展开的是同一全局面板，按钮隐藏', async ({ page }) => {
     await mockChatRun(page);
     await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
