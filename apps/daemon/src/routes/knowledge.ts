@@ -5,6 +5,7 @@
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { CreateVaultRequest, TreeNode } from '@molio/contracts';
@@ -435,7 +436,12 @@ export function knowledgeRoutes(
         const end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : fileSize - 1;
         const chunkSize = end - start + 1;
         const partial = createReadStream(absPath, { start, end });
-        return new Response(partial as any, {
+        // Response expects a WHATWG stream. Passing the Node Readable directly
+        // makes Undici adapt it as an async iterable; if a client cancels just
+        // as the file reaches EOF, that adapter can close its web controller
+        // twice (`ReadableStream is already closed`). Use Node's cancellation-
+        // aware adapter before constructing the Response.
+        return new Response(Readable.toWeb(partial), {
           status: 206,
           headers: {
             'Content-Type': mime,
@@ -447,7 +453,7 @@ export function knowledgeRoutes(
       }
 
       const fullStream = createReadStream(absPath);
-      return new Response(fullStream as any, {
+      return new Response(Readable.toWeb(fullStream), {
         headers: {
           'Content-Type': mime,
           'Content-Length': String(fileSize),
