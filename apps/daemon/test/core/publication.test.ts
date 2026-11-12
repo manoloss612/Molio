@@ -24,6 +24,30 @@ function createDb(): Database.Database {
   migratePublication(db);
   return db;
 }
+function observePublicationSelectTransactions(db: Database.Database, observations: boolean[], onStateRead?: () => void): Database.Database {
+  return new Proxy(db, {
+    get(target, property) {
+      if (property === 'prepare') return (sql: string) => {
+        const statement = target.prepare(sql);
+        if (!/^\s*SELECT\b/i.test(sql) || !/publication_(?:state|pages|edges|assets|page_assets)\b/i.test(sql)) return statement;
+        return new Proxy(statement, {
+          get(inner, method) {
+            const value = Reflect.get(inner, method, inner) as unknown;
+            if (method !== 'get' && method !== 'all') return value;
+            return (...args: unknown[]) => {
+              observations.push(target.inTransaction);
+              const result = (value as (...values: unknown[]) => unknown).apply(inner, args);
+              if (/FROM\s+publication_state\b/i.test(sql)) onStateRead?.();
+              return result;
+            };
+          },
+        });
+      };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Database.Database;
+}
 after(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
 
 test('a new publication store is closed and exposes no source vault details', () => {
@@ -31,10 +55,72 @@ test('a new publication store is closed and exposes no source vault details', ()
   try {
     const store = createPublicationStore(db);
     assert.deepEqual(store.getPublicSite(), { enabled: false, revision: 0, pages: [] });
-    assert.deepEqual(store.getPublicGraph(0), { revision: 0, nodes: [], edges: [] });
+    assert.equal(store.getPublicGraph(0), null);
     assert.equal(store.getPublicPage('missing', 0), null);
     assert.equal(JSON.stringify(store.getPublicSite()).includes('vaultId'), false);
   } finally { db.close(); }
+});
+
+test('public site, page, graph, and asset reads use one SQLite read transaction each', () => {
+  const baseDb = createDb();
+  const observations: boolean[] = [];
+  const db = observePublicationSelectTransactions(baseDb, observations);
+  const vaultPath = makeVault([['wiki/a.md', '# Public A\n\n![pixel](pixel.png)\n']]);
+  writeFileSync(path.join(vaultPath, 'wiki/pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=', 'base64'));
+  try {
+    const store = createPublicationStore(db);
+    const preview = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md'] });
+    store.commitPreview('session', preview.id, preview.expectedRevision);
+    store.setSiteEnabled(1, true);
+    observations.length = 0;
+
+    const site = store.getPublicSite();
+    const page = store.getPublicPage(site.pages[0]!.id, site.revision);
+    const graph = store.getPublicGraph(site.revision);
+    const asset = page?.assetIds[0] ? store.getPublicAsset(page.assetIds[0], site.revision) : null;
+
+    assert.ok(page);
+    assert.ok(graph);
+    assert.ok(asset);
+    assert.ok(observations.length >= 8, 'site and content reads execute their state and DTO queries');
+    assert.ok(observations.every(Boolean), `every public SELECT must run inside its read transaction: ${observations}`);
+  } finally { baseDb.close(); }
+});
+
+test('an in-flight public read keeps one WAL snapshot across a concurrent site close', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'molio-publication-read-race-'));
+  dirs.push(dir);
+  const dbPath = path.join(dir, 'publication.sqlite');
+  const readerDb = new Database(dbPath);
+  readerDb.pragma('journal_mode = WAL');
+  const writerDb = new Database(dbPath);
+  const observations: boolean[] = [];
+  let closeAfterStateRead: (() => void) | undefined;
+  const reader = observePublicationSelectTransactions(readerDb, observations, () => {
+    const close = closeAfterStateRead;
+    closeAfterStateRead = undefined;
+    close?.();
+  });
+  const vaultPath = makeVault([['wiki/a.md', '# Snapshot A\n']]);
+  try {
+    const store = createPublicationStore(reader);
+    const preview = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md'] });
+    store.commitPreview('session', preview.id, preview.expectedRevision);
+    store.setSiteEnabled(1, true);
+    const site = store.getPublicSite();
+    const pageId = site.pages[0]!.id;
+    observations.length = 0;
+
+    closeAfterStateRead = () => { writerDb.prepare('UPDATE publication_state SET enabled = 0 WHERE id = 1').run(); };
+    const inFlight = store.getPublicPage(pageId, site.revision);
+    assert.match(inFlight?.markdown ?? '', /Snapshot A/);
+    assert.equal((writerDb.prepare('SELECT enabled FROM publication_state WHERE id = 1').get() as { enabled: number }).enabled, 0);
+    assert.ok(observations.length >= 2);
+    assert.ok(observations.every(Boolean), `all in-flight SELECTs share the reader transaction: ${observations}`);
+
+    const afterClose = store.getPublicPage(pageId, site.revision);
+    assert.equal(afterClose, null, 'a read started after the close commit is unavailable');
+  } finally { writerDb.close(); readerDb.close(); }
 });
 
 test('active publication survives database reopen while in-memory previews expire with the process', () => {
@@ -76,10 +162,12 @@ test('publication projects only selected Wiki pages and links whose targets are 
       vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md', 'wiki/b.md'],
     });
     store.commitPreview('admin-session-a', preview.id, preview.expectedRevision);
+    store.setSiteEnabled(preview.expectedRevision + 1, true);
 
     const site = store.getPublicSite();
     assert.deepEqual(site.pages.map((page) => page.title).sort(), ['Public A', 'Public B']);
     const graph = store.getPublicGraph(site.revision);
+    assert.ok(graph);
     assert.deepEqual(graph.nodes.map((node) => node.title).sort(), ['Public A', 'Public B']);
     assert.equal(graph.edges.length, 1);
     assert.deepEqual(graph.edges, [{ source: site.pages.find((page) => page.title === 'Public A')!.id, target: site.pages.find((page) => page.title === 'Public B')!.id }]);
@@ -100,6 +188,7 @@ test('updating one page keeps other published pages and does not expose edits be
     const store = createPublicationStore(db);
     const first = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md', 'wiki/b.md'] });
     store.commitPreview('session', first.id, first.expectedRevision);
+    store.setSiteEnabled(first.expectedRevision + 1, true);
     const oldSite = store.getPublicSite();
     const oldA = oldSite.pages.find((page) => page.title === 'A old')!;
     const b = oldSite.pages.find((page) => page.title === 'B stays')!;
@@ -129,6 +218,7 @@ test('preview candidate is immutable, session-bound, expires, and rejects a stal
     assert.throws(() => store.commitPreview('session-b', preview.id, preview.expectedRevision), /session/i);
     assert.throws(() => store.commitPreview('session-a', preview.id, preview.expectedRevision + 1), /revision/i);
     store.commitPreview('session-a', preview.id, preview.expectedRevision);
+    store.setSiteEnabled(preview.expectedRevision + 1, true);
     const page = store.getPublicSite().pages[0]!;
     assert.match(store.getPublicPage(page.id, store.getPublicSite().revision)!.markdown, /Preview bytes/);
     assert.doesNotMatch(store.getPublicPage(page.id, store.getPublicSite().revision)!.markdown, /Changed after preview/);
@@ -146,6 +236,7 @@ test('failed snapshot transaction keeps the prior revision and site state', () =
     const store = createPublicationStore(db);
     const first = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md'] });
     store.commitPreview('session', first.id, first.expectedRevision);
+    store.setSiteEnabled(first.expectedRevision + 1, true);
     const before = store.getPublicSite();
     writeFileSync(path.join(vaultPath, 'wiki/a.md'), '# A rejected\n');
     const second = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md'] });
@@ -172,6 +263,7 @@ test('shared approved images are stored once and remain available while a public
     assert.ok(aPreview?.assets[0], 'preview identifies approved image dependency');
     assert.equal(aPreview?.assets[0]?.id, bPreview?.assets[0]?.id, 'shared source image has one public asset ID');
     store.commitPreview('session', preview.id, preview.expectedRevision);
+    store.setSiteEnabled(preview.expectedRevision + 1, true);
     const site = store.getPublicSite();
     const a = site.pages.find((page) => page.title === 'A')!;
     const b = site.pages.find((page) => page.title === 'B')!;
@@ -199,6 +291,7 @@ test('remote, unsupported, and out-of-vault image links are removed from the pub
     assert.doesNotMatch(body, /https:\/\/example\.test|\.\.\/\.\.\/secret|bad\.svg/);
     assert.ok(preview.warnings.length >= 3, 'preview explains each omitted image');
     store.commitPreview('session', preview.id, preview.expectedRevision);
+    store.setSiteEnabled(preview.expectedRevision + 1, true);
     const site = store.getPublicSite();
     const page = store.getPublicPage(site.pages[0]!.id, site.revision)!;
     assert.doesNotMatch(page.markdown, /https:\/\/example\.test|\.\.\/\.\.\/secret|bad\.svg/);

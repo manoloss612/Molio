@@ -141,9 +141,13 @@ export function createPublicationStore(
 
   return {
     getPublicSite(): PublicSite {
-      const state = getState();
-      const pages = db.prepare('SELECT page_id AS id, title FROM publication_pages WHERE revision = ? ORDER BY title COLLATE NOCASE, page_id').all(state.revision) as Array<{ id: string; title: string }>;
-      return { enabled: state.enabled === 1, revision: state.revision, pages };
+      return db.transaction(() => {
+        const state = getState();
+        const pages = state.enabled === 1
+          ? db.prepare('SELECT page_id AS id, title FROM publication_pages WHERE revision = ? ORDER BY title COLLATE NOCASE, page_id').all(state.revision) as Array<{ id: string; title: string }>
+          : [];
+        return { enabled: state.enabled === 1, revision: state.revision, pages };
+      })();
     },
     getAdminStatus(vaultId: string): PublicationStatus {
       const state = getState();
@@ -213,25 +217,31 @@ export function createPublicationStore(
       return { revision: state.revision, enabled, pageCount: getInternalPages(state.revision).length };
     },
     getPublicPage(pageId: string, revision: number): PublicPage | null {
-      const state = getState();
-      if (revision !== state.revision) return null;
-      const row = db.prepare('SELECT page_id AS id, title, markdown FROM publication_pages WHERE revision = ? AND page_id = ?').get(revision, pageId) as { id: string; title: string; markdown: string } | undefined;
-      if (!row) return null;
-      const assets = db.prepare('SELECT asset_id FROM publication_page_assets WHERE revision = ? AND page_id = ? ORDER BY asset_id').all(revision, pageId) as Array<{ asset_id: string }>;
-      return { revision, id: row.id, title: row.title, markdown: row.markdown, assetIds: assets.map((asset) => asset.asset_id) };
+      return db.transaction(() => {
+        const state = getState();
+        if (state.enabled !== 1 || revision !== state.revision) return null;
+        const row = db.prepare('SELECT page_id AS id, title, markdown FROM publication_pages WHERE revision = ? AND page_id = ?').get(revision, pageId) as { id: string; title: string; markdown: string } | undefined;
+        if (!row) return null;
+        const assets = db.prepare('SELECT asset_id FROM publication_page_assets WHERE revision = ? AND page_id = ? ORDER BY asset_id').all(revision, pageId) as Array<{ asset_id: string }>;
+        return { revision, id: row.id, title: row.title, markdown: row.markdown, assetIds: assets.map((asset) => asset.asset_id) };
+      })();
     },
-    getPublicGraph(revision: number): PublicGraph {
-      const state = getState();
-      if (revision !== state.revision) return { revision, nodes: [], edges: [] };
-      const nodes = db.prepare('SELECT page_id AS id, title FROM publication_pages WHERE revision = ? ORDER BY page_id').all(revision) as Array<{ id: string; title: string }>;
-      const edges = db.prepare('SELECT source_id AS source, target_id AS target FROM publication_edges WHERE revision = ? ORDER BY source_id, target_id').all(revision) as Array<{ source: string; target: string }>;
-      return { revision, nodes, edges };
+    getPublicGraph(revision: number): PublicGraph | null {
+      return db.transaction(() => {
+        const state = getState();
+        if (state.enabled !== 1 || revision !== state.revision) return null;
+        const nodes = db.prepare('SELECT page_id AS id, title FROM publication_pages WHERE revision = ? ORDER BY page_id').all(revision) as Array<{ id: string; title: string }>;
+        const edges = db.prepare('SELECT source_id AS source, target_id AS target FROM publication_edges WHERE revision = ? ORDER BY source_id, target_id').all(revision) as Array<{ source: string; target: string }>;
+        return { revision, nodes, edges };
+      })();
     },
     getPublicAsset(assetId: string, revision: number): PublicAsset | null {
-      const state = getState();
-      if (revision !== state.revision) return null;
-      const row = db.prepare('SELECT content_type AS contentType, body FROM publication_assets WHERE revision = ? AND asset_id = ?').get(revision, assetId) as { contentType: PublicAsset['contentType']; body: Buffer } | undefined;
-      return row ? { revision, id: assetId, contentType: row.contentType, bytes: row.body } : null;
+      return db.transaction(() => {
+        const state = getState();
+        if (state.enabled !== 1 || revision !== state.revision) return null;
+        const row = db.prepare('SELECT content_type AS contentType, body FROM publication_assets WHERE revision = ? AND asset_id = ?').get(revision, assetId) as { contentType: PublicAsset['contentType']; body: Buffer } | undefined;
+        return row ? { revision, id: assetId, contentType: row.contentType, bytes: row.body } : null;
+      })();
     },
   };
 }
