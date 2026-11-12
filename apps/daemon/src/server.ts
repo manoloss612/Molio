@@ -38,7 +38,7 @@ import { createAccessGuard } from './core/access/guard.js';
 import { accessRoutes } from './routes/access.js';
 import { createPublicationStore } from './core/publication/store.js';
 import { publicRoutes } from './routes/public.js';
-import { publicationRoutes } from './routes/publication.js';
+import { createPublicationPrincipalResolver, publicationRoutes } from './routes/publication.js';
 
 // Validate before constructing services or opening application data.
 export const accessConfig = loadAccessConfig(process.env);
@@ -99,7 +99,11 @@ app.use('*', cors({
 
 app.route('/api/access', accessRoutes(accessConfig, adminSessions));
 app.route('/api/public', publicRoutes(publicationStore));
-app.route('/api/publication', publicationRoutes(publicationStore, (vaultId) => getVault(db, vaultId)?.path ?? null));
+app.route('/api/publication', publicationRoutes(
+  publicationStore,
+  (vaultId) => getVault(db, vaultId)?.path ?? null,
+  createPublicationPrincipalResolver(accessConfig.mode, adminSessions),
+));
 
 // Health check — includes process metrics so the desktop shell can bridge
 // daemon memory data to ARMS (the daemon has no ARMS SDK of its own).

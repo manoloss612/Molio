@@ -6,13 +6,13 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { Hono } from 'hono';
 import { createAccessGuard } from '../../src/core/access/guard.js';
-import { csrfToken } from '../../src/core/access/guard.js';
+import { ADMIN_COOKIE, csrfToken } from '../../src/core/access/guard.js';
 import { createSessionStore } from '../../src/core/access/sessions.js';
 import type { AccessConfig } from '../../src/core/access/config.js';
 import { migratePublication } from '../../src/core/publication/migration.js';
 import { createPublicationStore } from '../../src/core/publication/store.js';
 import { publicRoutes } from '../../src/routes/public.js';
-import { publicationRoutes } from '../../src/routes/publication.js';
+import { createPublicationPrincipalResolver, publicationRoutes } from '../../src/routes/publication.js';
 
 const origin = 'https://example.test';
 const dirs: string[] = [];
@@ -30,7 +30,7 @@ function fixture() {
   const app = new Hono();
   app.use('*', createAccessGuard(adminConfig, null));
   app.route('/api/public', publicRoutes(store));
-  app.route('/api/publication', publicationRoutes(store, (vaultId) => vaultId === 'vault-a' ? vaultPath : null));
+  app.route('/api/publication', publicationRoutes(store, (vaultId) => vaultId === 'vault-a' ? vaultPath : null, () => 'local-process'));
   return { db, app, store, vaultPath };
 }
 
@@ -99,20 +99,49 @@ test('current admin can preview and commit only with trusted Origin and session 
     const config: AccessConfig = { mode: 'server', host: '127.0.0.1', publicOrigin: origin, username: 'admin', passwordHash: 'unused' };
     const sessions = createSessionStore(db, { credential: 'admin-credential' });
     const session = sessions.create();
-    const cookie = `__Host-molio_admin=${session.token}`;
+    const otherSession = sessions.create();
     const adminApp = new Hono();
     adminApp.use('*', createAccessGuard(config, sessions));
-    adminApp.route('/api/publication', publicationRoutes(store, (vaultId) => vaultId === 'vault-a' ? vaultPath : null));
-    const post = (endpoint: string, body: unknown, headers: Record<string, string> = {}) => adminApp.request(`/api/publication/${endpoint}`, {
-      method: 'POST', headers: { cookie, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body),
+    adminApp.route('/api/publication', publicationRoutes(
+      store,
+      (vaultId) => vaultId === 'vault-a' ? vaultPath : null,
+      createPublicationPrincipalResolver(config.mode, sessions),
+    ));
+    const post = (token: string, endpoint: string, body: unknown, headers: Record<string, string> = {}) => adminApp.request(`/api/publication/${endpoint}`, {
+      method: 'POST', headers: { cookie: `${ADMIN_COOKIE}=${token}`, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body),
     });
     const input = { vaultId: 'vault-a', selectedPaths: ['wiki/a.md'] };
-    assert.equal((await post('preview', input, { origin })).status, 403);
-    const previewResponse = await post('preview', input, { origin, 'x-molio-csrf': csrfToken(session.token) });
+    assert.equal((await post(session.token, 'preview', input, { origin })).status, 403);
+    const previewResponse = await post(session.token, 'preview', input, { origin, 'x-molio-csrf': csrfToken(session.token) });
     assert.equal(previewResponse.status, 200);
     const preview = await previewResponse.json() as { id: string; expectedRevision: number };
-    assert.equal((await post('commit', { previewId: preview.id, expectedRevision: preview.expectedRevision }, { origin, 'x-molio-csrf': csrfToken(session.token) })).status, 200);
+    const commitBody = { previewId: preview.id, expectedRevision: preview.expectedRevision };
+    assert.equal((await post(otherSession.token, 'commit', commitBody, { origin, 'x-molio-csrf': csrfToken(otherSession.token) })).status, 401);
+    assert.equal((await post(session.token, 'commit', commitBody, { origin, 'x-molio-csrf': csrfToken(session.token), cookie: `${ADMIN_COOKIE}=${session.token}; unrelated=rotated` })).status, 200);
     sessions.revoke(session.token);
-    assert.equal((await adminApp.request('/api/publication/status?vaultId=vault-a', { headers: { cookie } })).status, 401);
+    assert.equal((await adminApp.request('/api/publication/status?vaultId=vault-a', { headers: { cookie: `${ADMIN_COOKIE}=${session.token}` } })).status, 401);
+  } finally { db.close(); }
+});
+
+test('local mode can create and commit a preview under its process principal without cookies', async () => {
+  const { db, store, vaultPath } = fixture();
+  try {
+    const localApp = new Hono();
+    localApp.route('/api/publication', publicationRoutes(
+      store,
+      (vaultId) => vaultId === 'vault-a' ? vaultPath : null,
+      createPublicationPrincipalResolver('local', null),
+    ));
+    const previewResponse = await localApp.request('/api/publication/preview', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vaultId: 'vault-a', selectedPaths: ['wiki/a.md'] }),
+    });
+    assert.equal(previewResponse.status, 200);
+    const preview = await previewResponse.json() as { id: string; expectedRevision: number };
+    const commitResponse = await localApp.request('/api/publication/commit', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ previewId: preview.id, expectedRevision: preview.expectedRevision }),
+    });
+    assert.equal(commitResponse.status, 200);
   } finally { db.close(); }
 });
