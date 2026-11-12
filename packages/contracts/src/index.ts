@@ -120,6 +120,22 @@ export type {
 } from './knowledge.js';
 
 export type {
+  PublicPageSummary,
+  PublicSite,
+  PublicPage,
+  PublicGraph,
+  PublicAsset,
+  PublicationStatus,
+  PublicationPreviewRequest,
+  PublicationPreviewPage,
+  PublicationPreview,
+  PublicationCommitRequest,
+  PublicationWithdrawRequest,
+  PublicationSiteRequest,
+  PublicationRevision,
+} from './publication.js';
+
+export type {
   SkillKind,
   SkillManifestEntry,
   CreateSkillRequest,
