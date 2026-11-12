@@ -6,6 +6,8 @@ import { test, expect } from './fixtures/admin-server';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+test.use({ ignoreHTTPSErrors: true });
+
 test('administrator publishes selected Wiki pages and anonymous visitor navigates the snapshot', async ({ page, browser, admin }) => {
   const wiki = join(admin.vaultDir, 'wiki');
   mkdirSync(wiki, { recursive: true });

@@ -6,6 +6,8 @@ import { test, expect } from './fixtures/admin-server';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+test.use({ ignoreHTTPSErrors: true });
+
 test('HTTPS visitor reads only the active revision and withdrawn content becomes unavailable', async ({ page, browser, admin }) => {
   const wiki = join(admin.vaultDir, 'wiki');
   mkdirSync(wiki, { recursive: true });
