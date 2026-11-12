@@ -10,7 +10,7 @@ const PREVIEW_TTL_MS = 10 * 60 * 1000;
 
 interface PublicationStateRow { enabled: number; revision: number; vault_id: string | null }
 interface InternalPageRow { page_id: string; title: string; markdown: string; source_path: string; source_markdown: string; project_markdown: string; assets: PublicationDraftAsset[] }
-interface PreviewRequest { vaultId: string; vaultPath: string; selectedPaths: string[] }
+export interface PublicationStorePreviewRequest { vaultId: string; vaultPath: string; selectedPaths: string[] }
 interface Candidate { id: string; sessionKey: string; expectedRevision: number; expiresAt: number; draft: PublicationDraft; selectedPages: PublicationDraft['pages'] }
 
 export function createPublicationStore(
@@ -67,7 +67,7 @@ export function createPublicationStore(
     return { sourcePath: relative, absolutePath: actual };
   }
 
-  function createDraft(request: PreviewRequest): { draft: PublicationDraft; selectedPages: PublicationDraft['pages'] } {
+  function createDraft(request: PublicationStorePreviewRequest): { draft: PublicationDraft; selectedPages: PublicationDraft['pages'] } {
     if (!request.vaultId || request.selectedPaths.length === 0) throw new Error('Select at least one Wiki page');
     if (new Set(request.selectedPaths).size !== request.selectedPaths.length) throw new Error('Duplicate Wiki source path');
     if (request.selectedPaths.length > limits.maxPages) throw new Error(`Publication exceeds ${limits.maxPages} pages`);
@@ -164,7 +164,7 @@ export function createPublicationStore(
         }).sort((a, b) => a.sourcePath.localeCompare(b.sourcePath)),
       };
     },
-    createPreview(sessionKey: string, request: PreviewRequest): PublicationPreview {
+    createPreview(sessionKey: string, request: PublicationStorePreviewRequest): PublicationPreview {
       if (!sessionKey) throw new Error('An authenticated session is required');
       const built = createDraft(request);
       const state = getState();
