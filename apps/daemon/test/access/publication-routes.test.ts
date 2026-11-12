@@ -56,6 +56,9 @@ test('anonymous public routes return only active snapshot data and unavailable I
     assert.equal(graph.status, 200);
     const graphBody = await graph.json() as { nodes: unknown[] };
     assert.deepEqual(graphBody.nodes.length, 1);
+    const staleGraph = await app.request('/api/public/graph?revision=999');
+    assert.equal(staleGraph.status, 404);
+    assert.deepEqual(await staleGraph.json(), { error: 'unavailable' });
     const unavailable = await app.request(`/api/public/pages/123e4567-e89b-42d3-a456-426614174000?revision=${body.revision}`);
     assert.equal(unavailable.status, 404);
     assert.deepEqual(await unavailable.json(), await (await app.request(`/api/public/pages/${id}?revision=999`)).json());
@@ -75,6 +78,7 @@ test('anonymous API cannot read a closed site and every stale revision is unavai
     store.setSiteEnabled(site.revision, false);
     assert.deepEqual(await (await app.request('/api/public/site')).json(), { enabled: false, revision: site.revision, pages: [] });
     assert.equal((await app.request(`/api/public/pages/${id}?revision=${site.revision}`)).status, 404);
+    assert.deepEqual(await (await app.request(`/api/public/graph?revision=${site.revision}`)).json(), { error: 'unavailable' });
   } finally { db.close(); }
 });
 

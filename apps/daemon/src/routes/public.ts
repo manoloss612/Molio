@@ -27,10 +27,9 @@ export function publicRoutes(store: PublicationStore): Hono {
     return c.json(site.enabled ? site : { ...site, pages: [] });
   });
   app.get('/pages/:id', (c) => {
-    const site = store.getPublicSite();
     const revision = revisionFrom(c);
     const id = c.req.param('id');
-    if (!site.enabled || !UUID.test(id) || revision === null || revision !== site.revision) return unavailable(c);
+    if (!UUID.test(id) || revision === null) return unavailable(c);
     const page: PublicPage | null = store.getPublicPage(id, revision);
     if (!page) return unavailable(c);
     c.header('Cache-Control', 'no-store');
@@ -38,19 +37,18 @@ export function publicRoutes(store: PublicationStore): Hono {
     return c.json(page);
   });
   app.get('/graph', (c) => {
-    const site = store.getPublicSite();
     const revision = revisionFrom(c);
-    if (!site.enabled || revision === null || revision !== site.revision) return unavailable(c);
-    const graph: PublicGraph = store.getPublicGraph(revision);
+    if (revision === null) return unavailable(c);
+    const graph: PublicGraph | null = store.getPublicGraph(revision);
+    if (!graph) return unavailable(c);
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
     return c.json(graph);
   });
   app.get('/assets/:id', (c) => {
-    const site = store.getPublicSite();
     const revision = revisionFrom(c);
     const id = c.req.param('id');
-    if (!site.enabled || !UUID.test(id) || revision === null || revision !== site.revision) return unavailable(c);
+    if (!UUID.test(id) || revision === null) return unavailable(c);
     const asset: PublicAsset | null = store.getPublicAsset(id, revision);
     if (!asset) return unavailable(c);
     c.header('Cache-Control', 'no-store');
