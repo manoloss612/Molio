@@ -1,26 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { marked } from 'marked';
-import DOMPurify from 'isomorphic-dompurify';
 import type { PublicGraph, PublicPage, PublicSite as PublicSiteDto } from '@molio/contracts';
-import { publicApi, PublicationApiError } from '../../api/publication';
+import { publicApi } from '../../api/publication';
 import { translate, type Locale } from '../../i18n';
+import { renderPublicMarkdown } from './publicMarkdown';
+import { loadPublicSnapshot, PublicSnapshotError, type PublicSnapshotTarget } from './publicSnapshot';
 import './public.css';
-
-function renderPublicMarkdown(markdown: string, revision: number): string {
-  const linked = markdown
-    .replace(/\]\(molio-page:([0-9a-f-]{36})\)/gi, `](/public/wiki/$1?revision=${revision})`)
-    .replace(/\]\(molio-asset:([0-9a-f-]{36})\)/gi, `](/api/public/assets/$1?revision=${revision})`)
-    .replace(/\]\(molio-unavailable:\)/g, '](#unavailable)');
-  const rendered = marked.parse(linked, { async: false, gfm: true }) as string;
-  const safe = DOMPurify.sanitize(rendered, { FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'video', 'audio', 'source', 'svg', 'math'], FORBID_ATTR: ['style', 'onerror', 'onclick'] });
-  const doc = new DOMParser().parseFromString(safe, 'text/html');
-  for (const image of doc.querySelectorAll('img')) {
-    const src = image.getAttribute('src') ?? '';
-    if (!/^\/api\/public\/assets\/[0-9a-f-]{36}\?revision=\d+$/i.test(src)) image.remove();
-  }
-  return doc.body.innerHTML;
-}
 
 function publicLocale(): Locale {
   try { return window.localStorage.getItem('molio.locale') === 'en' ? 'en' : 'zh'; }
@@ -41,28 +26,20 @@ export function PublicSite() {
 
   useEffect(() => {
     let active = true;
-    setLoading(true); setError(''); setPage(null); setGraph(null);
-    void (async () => {
-      try {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const current = await publicApi.site();
-          if (!active) return;
-          setSite(current);
-          if (!current.enabled) throw new Error(t('publicWiki.closed'));
-          if (pageId && !current.pages.some((item) => item.id === pageId)) throw new Error(t('publicWiki.unavailable'));
-          try {
-            if (isGraph) setGraph(await publicApi.graph(current.revision));
-            else if (pageId) setPage(await publicApi.page(pageId, current.revision));
-            break;
-          } catch (error) {
-            if (attempt === 0 && error instanceof PublicationApiError && error.status === 404) continue;
-            throw error;
-          }
-        }
-      } catch (e) {
-        if (active) setError(e instanceof Error ? e.message : '页面暂时无法访问。');
-      } finally { if (active) setLoading(false); }
-    })();
+    const target: PublicSnapshotTarget = isGraph ? { kind: 'graph' } : pageId ? { kind: 'page', pageId } : { kind: 'index' };
+    setLoading(true); setError(''); setSite(null); setPage(null); setGraph(null);
+    void loadPublicSnapshot(publicApi, target)
+      .then((snapshot) => {
+        if (!active) return;
+        setSite(snapshot.site); setPage(snapshot.page); setGraph(snapshot.graph);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        if (error instanceof PublicSnapshotError) {
+          setError(t(error.kind === 'closed' ? 'publicWiki.closed' : 'publicWiki.unavailable'));
+        } else setError(error instanceof Error ? error.message : t('publicWiki.unavailable'));
+      })
+      .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [location.pathname, pageId]);
 
