@@ -40,6 +40,7 @@ import { ContextMenu, type MenuItem } from './ContextMenu';
 import { useI18n } from '../../i18n';
 import { api } from '../../api/client';
 import { openInNewWindow } from '../../utils/openWindow';
+import { PublicationPanel } from '../publication/PublicationPanel';
 
 /** 非管理员 / 未登录点「发布到资源库」的落地页：官网联系方式（顾问个人微信二维码）。 */
 const PUBLISH_CONTACT_URL = 'https://molio.cn/enterprise.html#contact';
@@ -184,6 +185,7 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
   const [pendingUrlNav, setPendingUrlNav] = useState<UrlFileNavigation | null>(null);
   const [showOutline, setShowOutline] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showPublicPublication, setShowPublicPublication] = useState(false);
   // 发布 tab 表单是否有已填内容（PublishForm 上报）——关 tab 前的放弃确认用
   const publishDirtyRef = useRef(false);
 
@@ -1465,9 +1467,13 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
         onRetryTree={() => { void handleRefreshTree(); }}
         onPublishVault={handlePublishActive}
         publishGate={loggedIn && isMarketAdmin ? 'admin' : 'contact'}
+        onOpenPublicWiki={() => setShowPublicPublication(true)}
       >
         <div className="kb-resize-handle" onMouseDown={handleResizeStart} />
       </KbFilePanel>
+      {showPublicPublication && activeVaultId && <div className="publication-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowPublicPublication(false); }}>
+        <PublicationPanel vaultId={activeVaultId} tree={kb.tree} onClose={() => setShowPublicPublication(false)} />
+      </div>}
 
       {/* Tab Bar + Main Content */}
       <div className="kb-main-wrapper">

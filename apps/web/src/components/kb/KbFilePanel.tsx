@@ -54,6 +54,7 @@ interface KbFilePanelProps {
   onRetryTree?: () => void;
   /** Publish the current vault to the resources hub. */
   onPublishVault: () => void;
+  onOpenPublicWiki?: () => void;
   /**
    * 「发布到资源库」门禁的当前判定结果（管理员=页内发布 tab / 其他=系统浏览器打开
    * 官网联系页）。门禁是**异步**落定的（登录态 → GET /api/market/my → setState），
@@ -94,6 +95,7 @@ export const KbFilePanel = forwardRef<KbFilePanelHandle, KbFilePanelProps>(funct
   treeError,
   onRetryTree,
   onPublishVault,
+  onOpenPublicWiki,
   publishGate,
   children,
 }, ref) {
@@ -582,6 +584,9 @@ export const KbFilePanel = forwardRef<KbFilePanelHandle, KbFilePanelProps>(funct
             </svg>
           </button>
         )}
+        {onOpenPublicWiki && <button type="button" className="kb-btn" title="公开 Wiki" aria-label="公开 Wiki" data-testid="kb-btn-public-wiki" onClick={onOpenPublicWiki}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>}
       </div>
 
       {/* Search */}

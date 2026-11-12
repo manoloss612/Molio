@@ -143,6 +143,24 @@
         "publish-flow"
       ]
     },
+    "public-wiki": {
+      "paths": [
+        "apps/web/src/components/public/**",
+        "apps/web/src/components/publication/**",
+        "apps/web/src/api/publication.ts",
+        "apps/web/src/main.tsx",
+        "apps/web/src/components/kb/KnowledgeBasePage.tsx",
+        "apps/web/src/components/kb/KbFilePanel.tsx",
+        "apps/web/src/i18n/locales/*.ts",
+        "apps/daemon/src/core/publication/**",
+        "apps/daemon/src/routes/public*.ts",
+        "apps/daemon/src/core/access/guard.ts"
+      ],
+      "specs": [
+        "publication-ui",
+        "publication-server"
+      ]
+    },
     "runtimes": {
       "paths": [
         "apps/daemon/src/core/runtimes/*",
@@ -640,6 +658,14 @@
     "admin-access-ui": {
       "priority": "P0",
       "file": "admin-access-ui.spec.ts"
+    },
+    "publication-ui": {
+      "priority": "P1",
+      "file": "publication-ui.spec.ts"
+    },
+    "publication-server": {
+      "priority": "P1",
+      "file": "publication-server.spec.ts"
     }
   }
 }
