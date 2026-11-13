@@ -78,13 +78,13 @@ export function PublicationPanel({ vaultId, tree, onClose }: { vaultId: string; 
         const checked = selected.has(sourcePath);
         return <div className="publication-page-row" data-testid="publication-page-row" key={sourcePath} data-page-id={page?.id} data-published={page ? 'true' : 'false'}>
           <label><input type="checkbox" checked={checked} disabled={busy || switchBlocked} onChange={(e) => toggle(sourcePath, e.target.checked)} /><span>{sourcePath}</span></label>
-          {page ? <><span className="publication-page-row__status">{t('publicWiki.published')}</span><button type="button" data-testid={`publication-page-id-${sourcePath.endsWith('public-a.md') ? 'public-a' : sourcePath}`} data-page-id={page.id} onClick={() => void withdraw(page.id)} disabled={busy}>{t('publicWiki.withdraw')}</button></> : <span className="publication-page-row__status">{t('publicWiki.unpublished')}</span>}
+          {page ? <><span className="publication-page-row__status">{t('publicWiki.published')}</span><button type="button" data-testid={`publication-page-id-${page.id}`} data-page-id={page.id} onClick={() => void withdraw(page.id)} disabled={busy}>{t('publicWiki.withdraw')}</button></> : <span className="publication-page-row__status">{t('publicWiki.unpublished')}</span>}
         </div>;
       })}
     </div>
     <footer className="publication-panel__actions"><button type="button" data-testid="publication-preview" disabled={!selected.size || busy || switchBlocked} onClick={() => void createPreview()}>{busy ? t('publicWiki.processing') : t('publicWiki.preview')}</button></footer>
     {preview && <section className="publication-preview" aria-label="发布预览">
-      <h3>{t('publicWiki.confirm')} · {preview.pages.length}</h3><p>{t('publicWiki.revision', { revision: preview.pageCount })} · {preview.totalBytes} bytes</p>
+      <h3>{t('publicWiki.confirm')}</h3><p data-testid="publication-preview-revision">{t('publicWiki.revision', { revision: preview.expectedRevision })}</p><p data-testid="publication-preview-page-count">{t('publicWiki.pageCount', { count: preview.pageCount })} · {preview.totalBytes} bytes</p>
       {preview.warnings.map((warning) => <p className="publication-panel__warning" key={warning}>{warning}</p>)}
       <div data-testid="publication-preview-content">{preview.pages.map((page) => <article key={page.id}><h4>{page.title}</h4><p>{page.sourcePath}</p><pre>{page.markdown}</pre>{page.warnings.map((warning) => <p key={warning}>{warning}</p>)}</article>)}</div>
       <button type="button" data-testid="publication-commit" disabled={busy} onClick={() => void commit()}>{t('publicWiki.confirm')}</button>

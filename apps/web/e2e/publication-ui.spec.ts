@@ -31,6 +31,8 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
   await expect(page.getByTestId('publication-page-row').filter({ hasText: 'acceptance.md' })).toHaveCount(0);
   await a.getByRole('checkbox').check();
   await page.getByTestId('publication-preview').click();
+  await expect(page.getByTestId('publication-preview-revision')).toContainText('版本 0');
+  await expect(page.getByTestId('publication-preview-page-count')).toContainText('1');
   await expect(page.getByTestId('publication-preview-content')).toContainText('Public A');
   await expect(page.getByTestId('publication-preview-content')).not.toContainText('Private C');
   await page.getByTestId('publication-commit').click();
@@ -55,13 +57,30 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
     if (url.origin === admin.origin && url.pathname.startsWith('/api/')) publicRequests.push(url.pathname);
   });
   try {
-    await visitor.goto(`${admin.origin}/public/wiki/${(await page.getByTestId('publication-page-id-public-a').getAttribute('data-page-id'))}`);
+    const aId = await a.getAttribute('data-page-id');
+    expect(aId).toBeTruthy();
+    await visitor.goto(`${admin.origin}/public/wiki/${aId}`);
     await expect(visitor.getByTestId('public-wiki-page')).toContainText('Public A');
     await expect(visitor.getByTestId('public-wiki-page')).not.toContainText('Private C');
     expect(await visitor.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await visitor.evaluate(() => (window as Window & { __publicLeak?: boolean }).__publicLeak)).toBeUndefined();
     await expect(visitor.locator('.public-markdown img')).toHaveCount(0);
+    const bId = await page.locator('[data-testid="publication-page-row"]').filter({ hasText: 'public-b.md' }).getAttribute('data-page-id');
+    expect(bId).toBeTruthy();
+    let releaseSecondRead!: () => void;
+    const secondReadReleased = new Promise<void>((resolve) => { releaseSecondRead = resolve; });
+    let bReads = 0;
+    await visitor.route(`**/api/public/pages/${bId}?revision=*`, async (route) => {
+      bReads += 1;
+      if (bReads === 1) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'unavailable' }) });
+      const response = await route.fetch();
+      await secondReadReleased;
+      await route.fulfill({ response });
+    });
     await visitor.getByTestId('public-wiki-page').getByRole('link', { name: 'Public B' }).click();
+    await expect(visitor.getByTestId('public-wiki-page')).toHaveCount(0);
+    await expect(visitor.getByRole('status')).toBeVisible();
+    releaseSecondRead();
     await expect(visitor.getByTestId('public-wiki-page')).toContainText('Public B');
     await visitor.getByRole('link', { name: '图谱' }).click();
     await expect(visitor.getByTestId('public-graph')).toBeVisible();
@@ -74,4 +93,3 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
     expect(publicRequests.every((url) => url.startsWith('/api/public/'))).toBe(true);
   } finally { await anonymous.close(); }
 });
-

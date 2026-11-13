@@ -1071,6 +1071,7 @@ const zh: Record<string, string> = {
   'publicWiki.visitorSite': '访客站点',
   'publicWiki.allowVisitors': '允许访客浏览',
   'publicWiki.revision': '版本 {revision}',
+  'publicWiki.pageCount': '{count} 篇页面',
   'publicWiki.noPages': '当前知识库的 wiki/ 下没有 Markdown 页面。',
   'publicWiki.published': '已发布',
   'publicWiki.unpublished': '未发布',

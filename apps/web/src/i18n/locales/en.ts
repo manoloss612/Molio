@@ -1067,6 +1067,7 @@ const en: Record<string, string> = {
   'publicWiki.visitorSite': 'Visitor site',
   'publicWiki.allowVisitors': 'Allow visitors',
   'publicWiki.revision': 'Revision {revision}',
+  'publicWiki.pageCount': '{count} pages',
   'publicWiki.noPages': 'There are no Markdown pages under wiki/ in this vault.',
   'publicWiki.published': 'Published',
   'publicWiki.unpublished': 'Not published',
