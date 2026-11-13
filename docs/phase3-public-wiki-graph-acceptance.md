@@ -35,3 +35,28 @@ The first full E2E run exposed missing `ignoreHTTPSErrors` on the administrator 
 
 - Full Web E2E HTML report and Playwright traces: `apps/web/playwright-report/` and `apps/web/test-results/` (generated locally; not committed).
 - Source branch: `feat/public-wiki-graph` in the isolated worktree `/home/ss/.codex/worktrees/f1fa/molio`.
+
+## Boundary repair follow-up
+
+Date: 2026-11-13
+
+The independent review findings were addressed in the local feature branch:
+
+- Public site, page, graph, and asset responses now read state and content within one SQLite transaction. Requests started after close or revision change return the same unavailable response; an in-flight read can finish from its coherent prior snapshot.
+- Server preview candidates are bound to the digest of the verified administrator session. Local mode uses the documented process-local identity.
+- Public Markdown rewriting and revision retry are covered by focused web unit tests. Navigation clears the previous page while a stale response is retried.
+- Publication preview now shows the base content revision and selected page count as separate values. The page test selector uses its published ID rather than a fixture filename.
+- `enabled` is a separate visitor access gate and does not advance the content revision. `PublicSite.tsx` remains the route/navigation shell; Markdown projection and revision fetch/retry live in focused modules.
+
+Repair verification on 2026-11-13:
+
+| Command | Result |
+|---|---|
+| `pnpm typecheck` | Passed across all workspace packages. |
+| `pnpm --filter @molio/daemon test` | Passed; includes atomic read and preview principal regression coverage. |
+| `pnpm --filter @molio/web test` | 639 passed, 0 failed, 0 skipped. |
+| `pnpm --filter @molio/web exec playwright test -c playwright.admin.config.ts e2e/publication-ui.spec.ts e2e/publication-server.spec.ts` | 2 passed. |
+| `pnpm --filter @molio/web exec playwright test` | 652 passed, 1 skipped, 0 failed (653 total, 33.9 minutes). The skip is the existing `kb-large-file-too-large` case. |
+| `git diff --check 124c205..HEAD` | Passed. |
+
+No push, merge, deployment, reverse-proxy/certificate validation, or Windows/macOS package validation was performed. Changes remain in the isolated local feature worktree pending review.
