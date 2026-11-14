@@ -1,0 +1,28 @@
+.public-shell { min-height: 100vh; color: #20251f; background: #f5f4ef; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+.public-header { height: 64px; padding: 0 clamp(20px, 5vw, 72px); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e4e2d9; background: rgba(255,255,255,.82); }
+.public-brand { color: inherit; text-decoration: none; font-weight: 750; letter-spacing: -.03em; font-size: 20px; }
+.public-brand span { margin-left: 12px; color: #777b70; font-size: 13px; font-weight: 500; letter-spacing: 0; }
+.public-header nav { display: flex; gap: 20px; }
+.public-header a, .public-sidebar a, .public-content a { color: #426d52; }
+.public-layout { max-width: 1180px; margin: 0 auto; padding: 48px 28px; display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 56px; }
+.public-sidebar { display: flex; flex-direction: column; gap: 12px; align-self: start; position: sticky; top: 24px; }
+.public-sidebar h2 { margin: 0 0 8px; color: #777b70; font-size: 12px; text-transform: uppercase; letter-spacing: .12em; }
+.public-sidebar a { font-size: 14px; text-decoration: none; }
+.public-content { min-width: 0; max-width: 760px; }
+.public-content h1 { margin: 0 0 12px; font-size: clamp(32px, 5vw, 48px); letter-spacing: -.045em; line-height: 1.12; }
+.public-revision { margin: 0 0 18px; color: #84877e; font-size: 12px; }
+.public-markdown { font-size: 16px; line-height: 1.85; overflow-wrap: anywhere; }
+.public-markdown h1, .public-markdown h2, .public-markdown h3 { margin: 1.8em 0 .6em; letter-spacing: -.025em; }
+.public-markdown p { margin: 1em 0; }
+.public-markdown pre { overflow: auto; padding: 16px; border-radius: 10px; background: #eae9e2; }
+.public-markdown img { max-width: 100%; height: auto; border-radius: 8px; }
+.public-graph ul { list-style: none; padding: 0; margin: 20px 0; display: grid; gap: 10px; }
+.public-graph__canvas { width: 100%; min-height: 300px; max-height: 480px; border: 1px solid #e2e0d7; border-radius: 14px; background: radial-gradient(circle at center, #fff 0%, #f2f1eb 100%); }
+.public-graph__edges line { stroke: #a8b8a5; stroke-width: 2; }
+.public-graph__canvas a { cursor: pointer; }
+.public-graph__canvas circle { fill: #426d52; stroke: #fff; stroke-width: 4px; }
+.public-graph__canvas text { fill: #30372f; font-size: 13px; font-weight: 600; }
+.public-graph li { padding: 15px 18px; border: 1px solid #e2e0d7; border-radius: 12px; background: #fff; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.public-graph li a { font-weight: 650; }
+.public-graph li span { color: #7c8077; font-size: 13px; }
+@media (max-width: 680px) { .public-header { padding: 0 18px; } .public-layout { padding: 28px 18px; display: flex; flex-direction: column; gap: 28px; } .public-sidebar { position: static; flex-flow: row wrap; } .public-sidebar h2 { width: 100%; } }
