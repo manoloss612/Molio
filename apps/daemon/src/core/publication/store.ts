@@ -116,13 +116,15 @@ export function createPublicationStore(
       const insertAsset = db.prepare('INSERT INTO publication_assets (revision, asset_id, content_type, body) VALUES (?, ?, ?, ?)');
       const insertPageAsset = db.prepare('INSERT INTO publication_page_assets (revision, page_id, asset_id) VALUES (?, ?, ?)');
       const insertAssetAdmin = db.prepare('INSERT INTO publication_asset_admin (revision, asset_id, source_path) VALUES (?, ?, ?)');
+      const insertedAssets = new Set<string>();
       for (const page of draft.pages) {
         insertPage.run(revision, page.id, page.title, page.markdown);
         insertAdmin.run(revision, page.id, page.sourcePath, page.sourceMarkdown, page.projectMarkdown);
         upsertIdentity.run(draft.vaultId, page.sourcePath, page.id);
         for (const asset of page.assets) {
-          const exists = db.prepare('SELECT 1 FROM publication_assets WHERE revision = ? AND asset_id = ?').get(revision, asset.id);
+          const exists = insertedAssets.has(asset.id);
           if (!exists) {
+            insertedAssets.add(asset.id);
             insertAsset.run(revision, asset.id, asset.contentType, asset.bytes);
             insertAssetAdmin.run(revision, asset.id, asset.sourcePath);
           }

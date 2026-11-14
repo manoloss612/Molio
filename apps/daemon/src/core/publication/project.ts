@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { codeIntervals, intervalOverlaps } from '../wikilink-text.js';
-import type { PublicAsset, PublicGraph, PublicPage } from '@molio/contracts';
+import type { PublicAsset, PublicGraph } from '@molio/contracts';
 
 export interface PublicationDraftAsset {
   id: string;
@@ -261,12 +261,4 @@ export function buildPublicationDraft(
     edges: [...edges.values()],
   };
   return { vaultId, pages, graph, totalBytes, warnings: pages.flatMap((page) => page.warnings) };
-}
-
-export function toPublicPage(revision: number, page: PublicationDraftPage): PublicPage {
-  return { revision, id: page.id, title: page.title, markdown: page.markdown, assetIds: page.assets.map((asset) => asset.id) };
-}
-
-export function toPublicAsset(revision: number, asset: PublicationDraftAsset): PublicAsset {
-  return { revision, id: asset.id, contentType: asset.contentType, bytes: asset.bytes };
 }
