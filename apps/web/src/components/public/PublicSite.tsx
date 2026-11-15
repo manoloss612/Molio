@@ -43,7 +43,7 @@ export function PublicSite() {
     return () => { active = false; };
   }, [location.pathname, pageId]);
 
-  const html = useMemo(() => page && site ? renderPublicMarkdown(page.markdown, site.revision) : '', [page, site]);
+  const html = useMemo(() => page && site ? renderPublicMarkdown(page.markdown, site.revision, t('publicWiki.imageUnavailable')) : '', [page, site, locale]);
   const titles = new Map((site?.pages ?? []).map((item) => [item.id, item.title]));
   const title = page?.title ?? '公开 Wiki';
   return <main className="public-shell" data-testid="public-site">

@@ -3,8 +3,10 @@ import DOMPurify from 'isomorphic-dompurify';
 
 const PUBLIC_ASSET = /^\/api\/public\/assets\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\?revision=\d+$/i;
 
-export function renderPublicMarkdown(markdown: string, revision: number): string {
+export function renderPublicMarkdown(markdown: string, revision: number, imageUnavailableLabel = 'Image unavailable'): string {
+  const safeImageUnavailableLabel = imageUnavailableLabel.replace(/[\\`*_{}\[\]()#+\-.!|>]/g, '\\$&');
   const linked = markdown
+    .replace(/\[\[molio-image-unavailable\]\]/g, safeImageUnavailableLabel)
     .replace(/\]\(molio-page:([0-9a-f-]{36})\)/gi, `](/public/wiki/$1?revision=${revision})`)
     .replace(/\]\(molio-asset:([0-9a-f-]{36})\)/gi, `](/api/public/assets/$1?revision=${revision})`)
     .replace(/\]\(molio-unavailable:\)/g, '](#unavailable)');

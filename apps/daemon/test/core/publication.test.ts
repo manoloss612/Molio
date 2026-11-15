@@ -357,20 +357,22 @@ test('shared approved images are stored once and remain available while a public
 
 test('remote, unsupported, and out-of-vault image links are removed from the public projection', () => {
   const db = createDb();
-  const vaultPath = makeVault([['wiki/a.md', '# A\n\n![remote](https://example.test/secret.png)\n![traversal](../../secret.png)\n![svg](bad.svg)\n']]);
+  const vaultPath = makeVault([['wiki/a.md', '# A\n\n![remote](https://example.test/secret.png)\n![traversal](../../secret.png)\n![svg](bad.svg)\n![missing](missing.png)\n']]);
   writeFileSync(path.join(vaultPath, 'wiki/bad.svg'), '<svg></svg>');
   try {
     const store = createPublicationStore(db);
     const preview = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md'] });
     const body = preview.pages[0]!.markdown;
     assert.doesNotMatch(body, /https:\/\/example\.test|\.\.\/\.\.\/secret|bad\.svg/);
-    assert.ok(preview.warnings.length >= 3, 'preview explains each omitted image');
+    assert.ok(preview.warnings.length >= 4, 'preview explains each omitted image');
+    assert.match(body, /\[\[molio-image-unavailable\]\]/, 'image projection marker survives Wiki link projection');
     store.commitPreview('session', preview.id, preview.expectedRevision);
     store.setSiteEnabled(preview.expectedRevision + 1, true);
     const site = store.getPublicSite();
     const page = store.getPublicPage(site.pages[0]!.id, site.revision)!;
     assert.doesNotMatch(page.markdown, /https:\/\/example\.test|\.\.\/\.\.\/secret|bad\.svg/);
     assert.deepEqual(page.assetIds, []);
+    assert.match(page.markdown, /\[\[molio-image-unavailable\]\]/, 'public snapshot retains the display marker for visitor rendering');
   } finally { db.close(); }
 });
 
