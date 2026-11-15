@@ -83,6 +83,8 @@ test.describe('Composer / skill palette', () => {
   // → composer 停在「未选择代理」disabled 态，连 "/" 都打不进去（nightly 上
   // 9 条超时的根因，2026-11-01 诊断）。技能清单走的是真实 daemon 的
   // /api/skills，不受这两个路由 mock 影响。
+  // Palette interactions do not depend on a locally installed runtime.
+  // A previous test may have selected a runtime that is absent on this host.
   test.beforeEach(async ({ page }) => {
     await mockAgent(page);
   });

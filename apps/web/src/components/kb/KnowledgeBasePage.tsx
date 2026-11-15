@@ -1,3 +1,4 @@
+import { daemonFetch } from '../../api/http';
 /**
  * Knowledge Base page — assembles file panel, main content, wiki chat panel, and modals.
  * Now with: workspace tab system + right-click context menu + inline rename.
@@ -40,6 +41,7 @@ import { ContextMenu, type MenuItem } from './ContextMenu';
 import { useI18n } from '../../i18n';
 import { api } from '../../api/client';
 import { openInNewWindow } from '../../utils/openWindow';
+import { PublicationPanel } from '../publication/PublicationPanel';
 
 /** 非管理员 / 未登录点「发布到资源库」的落地页：官网联系方式（顾问个人微信二维码）。 */
 const PUBLISH_CONTACT_URL = 'https://molio.cn/enterprise.html#contact';
@@ -184,6 +186,7 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
   const [pendingUrlNav, setPendingUrlNav] = useState<UrlFileNavigation | null>(null);
   const [showOutline, setShowOutline] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showPublicPublication, setShowPublicPublication] = useState(false);
   // 发布 tab 表单是否有已填内容（PublishForm 上报）——关 tab 前的放弃确认用
   const publishDirtyRef = useRef(false);
 
@@ -208,8 +211,14 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
   // create, import, delete), reflect it into ?vault= so the URL stays an
   // accurate serialization of the window. Must come AFTER the file-nav effect.
   useEffect(() => {
-    if (!kb.activeVault?.id) return;
-    setSearchParams({ vault: kb.activeVault.id }, { replace: true });
+    const vaultId = kb.activeVault?.id;
+    if (!vaultId) return;
+    // Read the current URL: another navigation can occur before this effect
+    // runs, so a render-time searchParams snapshot may already be stale.
+    const next = new URLSearchParams(window.location.search);
+    if (next.get('vault') === vaultId) return;
+    next.set('vault', vaultId);
+    setSearchParams(next, { replace: true });
   }, [kb.activeVault?.id, setSearchParams]);
 
   // Handle location.state for in-app navigation (e.g., from graph double-click)
@@ -1439,6 +1448,10 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
 
   return (
     <div className="kb-shell">
+      {kb.transportState !== 'open' && kb.transportState !== 'closed' && <div className="admin-stream-notice admin-kb-stream-notice" data-testid="kb-transport-status" data-state={kb.transportState} role="status">
+        <span>{t(kb.transportState === 'paused' ? 'adminAccess.streamPaused' : 'adminAccess.streamReconnecting')}</span>
+        <button type="button" data-testid="kb-transport-retry" disabled={kb.transportState === 'checking'} onClick={kb.retryTransport}>{t('adminAccess.retryStream')}</button>
+      </div>}
       {/* File Panel */}
       <KbFilePanel
         ref={filePanelRef}
@@ -1465,9 +1478,13 @@ export function KnowledgeBasePage({ agentId, chatPanelRef }: KnowledgeBasePagePr
         onRetryTree={() => { void handleRefreshTree(); }}
         onPublishVault={handlePublishActive}
         publishGate={publishGate}
+        onOpenPublicWiki={() => setShowPublicPublication(true)}
       >
         <div className="kb-resize-handle" onMouseDown={handleResizeStart} />
       </KbFilePanel>
+      {showPublicPublication && activeVaultId && <div className="publication-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowPublicPublication(false); }}>
+        <PublicationPanel vaultId={activeVaultId} tree={kb.tree} onClose={() => setShowPublicPublication(false)} />
+      </div>}
 
       {/* Tab Bar + Main Content */}
       <div className="kb-main-wrapper">

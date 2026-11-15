@@ -162,6 +162,24 @@
         "publish-flow"
       ]
     },
+    "public-wiki": {
+      "paths": [
+        "apps/web/src/components/public/**",
+        "apps/web/src/components/publication/**",
+        "apps/web/src/api/publication.ts",
+        "apps/web/src/main.tsx",
+        "apps/web/src/components/kb/KnowledgeBasePage.tsx",
+        "apps/web/src/components/kb/KbFilePanel.tsx",
+        "apps/web/src/i18n/locales/*.ts",
+        "apps/daemon/src/core/publication/**",
+        "apps/daemon/src/routes/public*.ts",
+        "apps/daemon/src/core/access/guard.ts"
+      ],
+      "specs": [
+        "publication-ui",
+        "publication-server"
+      ]
+    },
     "runtimes": {
       "paths": [
         "apps/daemon/src/core/runtimes/*",
@@ -256,11 +274,23 @@
         "apps/web/src/styles/account.css",
         "apps/web/src/api/client.*",
         "apps/daemon/src/core/auth/*",
+        "apps/daemon/src/core/access/*",
+        "apps/daemon/src/routes/access.ts",
+        "apps/daemon/src/server.ts",
+        "apps/daemon/src/index.ts",
+        "apps/daemon/src/core/db.ts",
         "apps/daemon/src/routes/auth.ts",
-        "apps/cloud/src/*"
+        "apps/cloud/src/*",
+        "apps/web/src/access/**",
+        "apps/web/src/components/access/**",
+        "apps/web/src/styles/admin-access.css",
+        "apps/web/src/api/http.ts",
+        "apps/web/src/api/managed-events.ts"
       ],
       "specs": [
-        "auth"
+        "auth",
+        "admin-access-server",
+        "admin-access-ui"
       ]
     },
     "resources": {
@@ -334,6 +364,10 @@
     }
   },
   "specs": {
+    "admin-access-server": {
+      "priority": "P1",
+      "file": "admin-access-server.spec.ts"
+    },
     "auth": {
       "priority": "P1",
       "file": "auth.spec.ts"
@@ -654,6 +688,7 @@
       "priority": "P1",
       "file": "kb-tree-refresh-search.spec.ts"
     },
+
     "composer-skill-palette": {
       "priority": "P1",
       "file": "composer-skill-palette.spec.ts"
@@ -725,6 +760,18 @@
     "navigation-history": {
       "priority": "P1",
       "file": "navigation-history.spec.ts"
+    },
+    "admin-access-ui": {
+      "priority": "P0",
+      "file": "admin-access-ui.spec.ts"
+    },
+    "publication-ui": {
+      "priority": "P1",
+      "file": "publication-ui.spec.ts"
+    },
+    "publication-server": {
+      "priority": "P1",
+      "file": "publication-server.spec.ts"
     }
   }
 }

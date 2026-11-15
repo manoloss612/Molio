@@ -1,5 +1,7 @@
 // @molio/contracts — shared types for daemon, web, and desktop
 
+export type { AccessSession, AdminLoginRequest } from './access.js';
+
 export type {
   RuntimeAgentDef,
   RuntimeModelOption,
@@ -116,6 +118,22 @@ export type {
   QuizAttemptInput,
   SaveQuizAttemptsRequest,
 } from './knowledge.js';
+
+export type {
+  PublicPageSummary,
+  PublicSite,
+  PublicPage,
+  PublicGraph,
+  PublicAsset,
+  PublicationStatus,
+  PublicationPreviewRequest,
+  PublicationPreviewPage,
+  PublicationPreview,
+  PublicationCommitRequest,
+  PublicationWithdrawRequest,
+  PublicationSiteRequest,
+  PublicationRevision,
+} from './publication.js';
 
 export type {
   SkillKind,

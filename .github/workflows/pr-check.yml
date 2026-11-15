@@ -73,7 +73,8 @@ jobs:
     # 50 秒假红。26.04 支持随 Playwright 升级落地后再解除。
     runs-on: ubuntu-24.04
     needs: [build-and-test]
-    timeout-minutes: 20
+    # P0 specs always run; cross-cutting PRs can select 500+ E2E cases.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
