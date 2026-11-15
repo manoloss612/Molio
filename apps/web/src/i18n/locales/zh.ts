@@ -1086,6 +1086,7 @@ const zh: Record<string, string> = {
   'publicWiki.graph': '图谱',
   'publicWiki.loading': '正在加载…',
   'publicWiki.unavailable': '页面暂时无法访问。',
+  'publicWiki.imageUnavailable': '图片暂不可用',
   'publicWiki.closed': '这个 Wiki 站点暂未开放。',
   'publicWiki.graphTitle': '知识图谱',
   'publicWiki.noOutgoing': '暂无公开出链',
