@@ -292,20 +292,43 @@ function resolveDirectoryCase(vaultPath: string, requestedDir: string): string |
   let current = root;
   try {
     for (const segment of path.relative(root, requestedDir).split(path.sep).filter(Boolean)) {
-      let candidate = path.join(current, segment);
-      if (!fs.existsSync(candidate)) {
-        const entries = fs.readdirSync(current, { withFileTypes: true });
-        if (entries.length > MAX_DIR_ENTRIES) return null;
-        const matches = entries.filter((entry) => entry.isDirectory() && entry.name.toLowerCase() === segment.toLowerCase());
-        // Ambiguous matches must not resolve to an arbitrary folder.
-        if (matches.length !== 1) return null;
-        candidate = path.join(current, matches[0]!.name);
-      }
+      const entries = fs.readdirSync(current, { withFileTypes: true });
+      if (entries.length > MAX_DIR_ENTRIES) return null;
+      // existsSync is case-insensitive on Windows and can therefore succeed
+      // for a differently-cased request. Always recover the spelling from
+      // the directory entry so canonical paths match the vault tree.
+      const exact = entries.find((entry) => entry.name === segment);
+      const matches = entries.filter((entry) => entry.name.toLowerCase() === segment.toLowerCase());
+      // Prefer an exact spelling; otherwise an ambiguous case-insensitive
+      // match must not resolve to an arbitrary entry.
+      const match = exact ?? (matches.length === 1 ? matches[0] : undefined);
+      if (!match) return null;
+      const candidate = path.join(current, match.name);
       const real = resolveRealWithinVault(vaultPath, candidate);
       if (!fs.statSync(real).isDirectory()) return null;
       current = candidate;
     }
     return current;
+  } catch {
+    return null;
+  }
+}
+
+/** Recover the actual on-disk spelling for an existing file path. */
+function resolveFileCase(vaultPath: string, requestedFile: string): string | null {
+  const exact = resolveFilePath(vaultPath, requestedFile);
+  const dir = resolveDirectoryCase(vaultPath, path.dirname(exact));
+  if (!dir) return null;
+  try {
+    const entries = fs.readdirSync(dir);
+    const base = path.basename(exact);
+    const exactEntry = entries.find((entry) => entry === base);
+    const matches = entries.filter((entry) => entry.toLowerCase() === base.toLowerCase());
+    const match = exactEntry ?? (matches.length === 1 ? matches[0] : undefined);
+    if (!match) return null;
+    const candidate = path.join(dir, match);
+    resolveRealWithinVault(vaultPath, candidate);
+    return candidate;
   } catch {
     return null;
   }
@@ -496,7 +519,13 @@ export function resolveCanonicalPath(vaultPath: string, relPath: string): string
   let resolved: string;
   try {
     resolved = resolveFilePath(vaultPath, relPath);
-    if (!fs.existsSync(resolved)) {
+    if (fs.existsSync(resolved)) {
+      // On case-insensitive filesystems existsSync accepts aliases with the
+      // wrong spelling. Return the directory entry's canonical path instead.
+      if (process.platform === 'win32' || process.platform === 'darwin') {
+        resolved = resolveFileCase(vaultPath, relPath) ?? resolved;
+      }
+    } else {
       resolved = resolveWithFallbacks(vaultPath, relPath);
     }
   } catch {
