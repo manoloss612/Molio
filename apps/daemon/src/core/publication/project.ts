@@ -226,6 +226,7 @@ export function buildPublicationDraft(
       const range: [number, number] = [match.index, match.index + match[0].length];
       if (intervalOverlaps(range, intervals)) continue;
       const rawTarget = (match[1] ?? '').trim();
+      if (rawTarget === 'molio-image-unavailable') continue;
       const basenameOnly = rawTarget.replace(/\.md$/i, '').split('/').pop()?.toLowerCase();
       if (basenameOnly === 'index' || basenameOnly === 'log') continue;
       const targetPath = resolvePublicTarget(rawTarget, source.sourcePath, nameIndex);

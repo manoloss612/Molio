@@ -31,3 +31,10 @@ test('public markdown strips executable HTML and event handlers in Node', async 
   const html = renderPublicMarkdown('<script>window.__publicLeak = true</script><img src="/api/public/assets/123e4567-e89b-42d3-a456-426614174001?revision=7" onerror="window.__publicLeak = true">', 7);
   assert.doesNotMatch(html, /<script|onerror|__publicLeak/);
 });
+
+test('public markdown replaces internal unavailable-image marker with the localized label', async () => {
+  const { renderPublicMarkdown } = await import('./publicMarkdown.ts');
+  const html = renderPublicMarkdown('Before\n\n[[molio-image-unavailable]]\n\nAfter', 7, '图片暂不可用');
+  assert.match(html, /图片暂不可用/);
+  assert.doesNotMatch(html, /molio-image-unavailable/);
+});

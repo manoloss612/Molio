@@ -1170,6 +1170,7 @@ const en: Record<string, string> = {
   'publicWiki.graph': 'Graph',
   'publicWiki.loading': 'Loading…',
   'publicWiki.unavailable': 'This page is unavailable.',
+  'publicWiki.imageUnavailable': 'Image unavailable',
   'publicWiki.closed': 'This Wiki site is not open yet.',
   'publicWiki.graphTitle': 'Knowledge graph',
   'publicWiki.noOutgoing': 'No public outgoing links',
