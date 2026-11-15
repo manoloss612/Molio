@@ -33,6 +33,15 @@ function observePublicationSelectTransactions(db: Database.Database, observation
         return new Proxy(statement, {
           get(inner, method) {
             const value = Reflect.get(inner, method, inner) as unknown;
+            if (method === 'iterate') return (...args: unknown[]) => {
+              const iterator = (value as (...values: unknown[]) => IterableIterator<unknown>).apply(inner, args);
+              return (function* observeRows() {
+                for (const row of iterator) {
+                  observations.push(target.inTransaction);
+                  yield row;
+                }
+              })();
+            };
             if (method !== 'get' && method !== 'all') return value;
             return (...args: unknown[]) => {
               observations.push(target.inTransaction);
@@ -48,7 +57,73 @@ function observePublicationSelectTransactions(db: Database.Database, observation
     },
   }) as Database.Database;
 }
+function observeInternalPageQueries(db: Database.Database, statementCount: { value: number }): Database.Database {
+  return new Proxy(db, {
+    get(target, property) {
+      if (property === 'prepare') return (sql: string) => {
+        if (/^\s*SELECT\b/i.test(sql)
+          && /\bpublication_(?:pages|page_admin|page_assets|assets|asset_admin)\b/i.test(sql)) statementCount.value += 1;
+        return target.prepare(sql);
+      };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Database.Database;
+}
+function seedPublishedPages(db: Database.Database, pageCount: number): void {
+  const insertPage = db.prepare('INSERT INTO publication_pages (revision, page_id, title, markdown) VALUES (1, ?, ?, ?)');
+  const insertAdmin = db.prepare('INSERT INTO publication_page_admin (revision, page_id, source_path, source_markdown, project_markdown) VALUES (1, ?, ?, ?, ?)');
+  const insertSource = db.prepare('INSERT INTO publication_source_ids (vault_id, source_path, page_id) VALUES (?, ?, ?)');
+  const insertAsset = db.prepare('INSERT INTO publication_assets (revision, asset_id, content_type, body) VALUES (1, ?, ?, ?)');
+  const insertAssetAdmin = db.prepare('INSERT INTO publication_asset_admin (revision, asset_id, source_path) VALUES (1, ?, ?)');
+  const insertPageAsset = db.prepare('INSERT INTO publication_page_assets (revision, page_id, asset_id) VALUES (1, ?, ?)');
+  db.transaction(() => {
+    db.prepare('UPDATE publication_state SET enabled = 0, revision = 1, vault_id = ? WHERE id = 1').run('vault-a');
+    for (let index = 0; index < pageCount; index += 1) {
+      const suffix = String(index).padStart(4, '0');
+      const pageId = `page-${suffix}`;
+      const sourcePath = `wiki/existing-${suffix}.md`;
+      const assetId = `asset-${suffix}`;
+      insertPage.run(pageId, `Existing ${index}`, `# Existing ${index}`);
+      insertAdmin.run(pageId, sourcePath, `# Existing ${index}`, `# Existing ${index}`);
+      insertSource.run('vault-a', sourcePath, pageId);
+      insertAsset.run(assetId, 'image/png', Buffer.from([index % 256]));
+      insertAssetAdmin.run(assetId, `wiki/image-${suffix}.png`);
+      insertPageAsset.run(pageId, assetId);
+    }
+  })();
+}
 after(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
+
+test('internal publication page reads use a bounded number of SQL statements as snapshots grow', () => {
+  const measure = (pageCount: number) => {
+    const baseDb = createDb();
+    const statementCount = { value: 0 };
+    const db = observeInternalPageQueries(baseDb, statementCount);
+    try {
+      const store = createPublicationStore(db);
+      seedPublishedPages(baseDb, pageCount);
+      const statusBefore = store.getAdminStatus('vault-a');
+      assert.equal(statusBefore.pages.length, pageCount, 'admin status includes the seeded published page list');
+      assert.deepEqual(statusBefore.pages[0], {
+        id: 'page-0000', title: 'Existing 0', sourcePath: 'wiki/existing-0000.md', published: true,
+      });
+
+      statementCount.value = 0;
+      const revision = store.setSiteEnabled(1, false);
+      assert.equal(revision.pageCount, pageCount);
+      const internalPageStatementCount = statementCount.value;
+      const statusAfter = store.getAdminStatus('vault-a');
+      assert.deepEqual(statusAfter, statusBefore, 'the internal read optimization does not alter status fields');
+      return internalPageStatementCount;
+    } finally { baseDb.close(); }
+  };
+
+  const for100Pages = measure(100);
+  const for1000Pages = measure(1000);
+  assert.equal(for100Pages, for1000Pages, 'the number of prepared page/asset SELECTs must not grow with page count');
+  assert.ok(for1000Pages <= 2, `expected at most two page/asset SELECT statements, received ${for1000Pages}`);
+});
 
 test('a new publication store is closed and exposes no source vault details', () => {
   const db = createDb();
