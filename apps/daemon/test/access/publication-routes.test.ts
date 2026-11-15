@@ -70,15 +70,38 @@ test('anonymous public routes return only active snapshot data and unavailable I
 test('anonymous API cannot read a closed site and every stale revision is unavailable', async () => {
   const { db, app, store, vaultPath } = fixture();
   try {
+    writeFileSync(path.join(vaultPath, 'wiki/a.md'), '# Public marker\n\n![pixel](pixel.png)\n');
+    writeFileSync(path.join(vaultPath, 'wiki/pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=', 'base64'));
+    const beforePublish = store.getPublicSite();
+    assert.deepEqual(beforePublish, { enabled: false, revision: 0, pages: [] });
     const preview = store.createPreview('session', { vaultId: 'vault-a', vaultPath, selectedPaths: ['wiki/a.md'] });
     store.commitPreview('session', preview.id, preview.expectedRevision);
-    store.setSiteEnabled(1, true);
-    const site = store.getPublicSite();
+    const publishedWhileClosed = store.getPublicSite();
+    assert.equal(publishedWhileClosed.revision, beforePublish.revision + 1);
+    assert.equal(publishedWhileClosed.enabled, false, 'publishing content does not open the visitor site');
+
+    const opened = store.setSiteEnabled(publishedWhileClosed.revision, true);
+    assert.equal(opened.revision, publishedWhileClosed.revision, 'opening changes only the visitor gate');
+    const site = await (await app.request('/api/public/site')).json() as { enabled: boolean; revision: number; pages: Array<{ id: string }> };
+    assert.equal(site.enabled, true);
+    assert.equal(site.revision, publishedWhileClosed.revision);
     const id = site.pages[0]!.id;
-    store.setSiteEnabled(site.revision, false);
-    assert.deepEqual(await (await app.request('/api/public/site')).json(), { enabled: false, revision: site.revision, pages: [] });
-    assert.equal((await app.request(`/api/public/pages/${id}?revision=${site.revision}`)).status, 404);
-    assert.deepEqual(await (await app.request(`/api/public/graph?revision=${site.revision}`)).json(), { error: 'unavailable' });
+    const assetId = store.getPublicPage(id, site.revision)?.assetIds[0];
+    assert.ok(assetId, 'fixture publication includes a public image asset');
+
+    const closed = store.setSiteEnabled(site.revision, false);
+    assert.equal(closed.revision, site.revision, 'closing changes only the visitor gate');
+    const closedSite = await (await app.request('/api/public/site')).json();
+    assert.deepEqual(closedSite, { enabled: false, revision: site.revision, pages: [] });
+    for (const path of [
+      `/api/public/pages/${id}?revision=${site.revision}`,
+      `/api/public/graph?revision=${site.revision}`,
+      `/api/public/assets/${assetId}?revision=${site.revision}`,
+    ]) {
+      const response = await app.request(path);
+      assert.equal(response.status, 404, `${path} is unavailable while the site is closed`);
+      assert.deepEqual(await response.json(), { error: 'unavailable' });
+    }
   } finally { db.close(); }
 });
 
