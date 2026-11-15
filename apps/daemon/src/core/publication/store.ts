@@ -29,16 +29,21 @@ export function createPublicationStore(
       FROM publication_pages p JOIN publication_page_admin a USING (revision, page_id)
       WHERE p.revision = ? ORDER BY p.page_id
     `).all(revision) as Array<Omit<InternalPageRow, 'assets'>>;
-    return pages.map((page) => ({
-      ...page,
-      assets: db.prepare(`
-        SELECT pa.asset_id AS id, aa.source_path AS sourcePath, a.content_type AS contentType, a.body AS bytes
-        FROM publication_page_assets pa
-        JOIN publication_assets a USING (revision, asset_id)
-        JOIN publication_asset_admin aa USING (revision, asset_id)
-        WHERE pa.revision = ? AND pa.page_id = ?
-      `).all(revision, page.page_id) as PublicationDraftAsset[],
-    }));
+    const assetsByPage = new Map<string, PublicationDraftAsset[]>();
+    const assetRows = db.prepare(`
+      SELECT pa.page_id, pa.asset_id AS id, aa.source_path AS sourcePath,
+        assets.content_type AS contentType, assets.body AS bytes
+      FROM publication_page_assets pa
+      JOIN publication_assets assets USING (revision, asset_id)
+      JOIN publication_asset_admin aa USING (revision, asset_id)
+      WHERE pa.revision = ? ORDER BY pa.page_id, pa.asset_id
+    `).iterate(revision) as IterableIterator<{ page_id: string } & PublicationDraftAsset>;
+    for (const row of assetRows) {
+      const assets = assetsByPage.get(row.page_id) ?? [];
+      assets.push({ id: row.id, sourcePath: row.sourcePath, contentType: row.contentType, bytes: row.bytes });
+      assetsByPage.set(row.page_id, assets);
+    }
+    return pages.map((page) => ({ ...page, assets: assetsByPage.get(page.page_id) ?? [] }));
   };
 
   function assertRevision(expectedRevision: number): PublicationStateRow {
