@@ -39,7 +39,7 @@
 - `apps/daemon/src/routes/publication.ts`：管理员候选、预览、提交、撤回和站点启停 API。
 - `apps/daemon/src/routes/public.ts`：匿名站点摘要、页面、图谱和图片读取 API；只依赖活动 revision 存储接口。
 - `apps/daemon/src/core/access/guard.ts`：精确放行匿名 GET/HEAD 路由；其余 API 仍受管理员保护。
-- `apps/web/src/components/public/`：不挂载 `App`/`AccessBoundary` 的只读公开 shell、Wiki 页面和图谱视图。
+- `apps/web/src/components/public/PublicSite.tsx`：不挂载 `App`/`AccessBoundary` 的只读公开 route shell；同一组件根据路径展示页面列表、Wiki 页面或图谱，图谱使用内联 SVG 渲染。公开 Markdown 投影与 revision 加载/重试逻辑由同目录的独立模块负责。
 - `apps/web/src/components/publication/` 与 `apps/web/src/api/publication.ts`：管理员发布选择、预览确认和状态操作。
 - `apps/web/e2e/publication-*.spec.ts`：local UI 回归和真实 HTTPS server 验收。
 
@@ -135,8 +135,6 @@ POST /api/publication/site
 **Files:**
 - Create: `apps/web/src/api/publication.ts`
 - Create: `apps/web/src/components/public/PublicSite.tsx`
-- Create: `apps/web/src/components/public/PublicWikiPage.tsx`
-- Create: `apps/web/src/components/public/PublicGraphPage.tsx`
 - Create: `apps/web/src/components/publication/PublicationPanel.tsx`
 - Create: corresponding CSS modules, localized strings, and `apps/web/e2e/publication-ui.spec.ts`
 - Create: `apps/web/e2e/publication-server.spec.ts`
@@ -144,7 +142,7 @@ POST /api/publication/site
 
 **Interfaces:**
 - Consumes: Task 1 public/admin contracts and Task 2 API routes.
-- Produces: independent public route shell outside the admin boundary; admin panel uses existing authenticated `daemonFetch`; public UI calls only `/api/public/*`.
+- Produces: one `PublicSite.tsx` route shell outside the admin boundary. It renders the Wiki page and graph inline (the graph is SVG); admin panel uses existing authenticated `daemonFetch`; public UI calls only `/api/public/*`.
 
 - [ ] Add Playwright tests for the source selection list and per-page selection in the chosen vault's `wiki/` tree; pages outside `wiki/` cannot enter the candidate.
 - [ ] Add tests for previewing body, links and image inventory, source edits after preview, commit of exact preview bytes, preserved already-published pages, page withdrawal, and clear failure/expiry/conflict feedback.
