@@ -248,6 +248,8 @@ export function HomePage({
           <ChatSessionView
             messages={state.messages}
             isRunning={state.isRunning}
+            transportState={state.transportState}
+            onRetryTransport={state.retryTransport}
             activity={state.activity}
             conversationId={state.conversationId}
             onSend={state.buildSend()}
