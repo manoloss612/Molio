@@ -11,7 +11,7 @@ test.use({ ignoreHTTPSErrors: true });
 test('administrator publishes selected Wiki pages and anonymous visitor navigates the snapshot', async ({ page, browser, admin }) => {
   const wiki = join(admin.vaultDir, 'wiki');
   mkdirSync(wiki, { recursive: true });
-  writeFileSync(join(wiki, 'public-a.md'), '# Public A\n\nLinks to [[Public B]] and [[Private C]].\n\n<script>window.__publicLeak = true</script>\n<img src="/api/knowledge/private-marker">\n');
+  writeFileSync(join(wiki, 'public-a.md'), '# Public A\n\nLinks to [[Public B]] and [[Private C]].\n\n![Missing image](missing-image.png)\n\n<script>window.__publicLeak = true</script>\n<img src="/api/knowledge/private-marker">\n');
   writeFileSync(join(wiki, 'public-b.md'), '# Public B\n');
   writeFileSync(join(wiki, 'private-c.md'), '# Private C\n');
 
@@ -65,6 +65,8 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
     expect(await visitor.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await visitor.evaluate(() => (window as Window & { __publicLeak?: boolean }).__publicLeak)).toBeUndefined();
     await expect(visitor.locator('.public-markdown img')).toHaveCount(0);
+    await expect(visitor.getByTestId('public-wiki-page')).toContainText('图片暂不可用');
+    await expect(visitor.getByTestId('public-wiki-page')).not.toContainText('molio-image-unavailable');
     const bId = await page.locator('[data-testid="publication-page-row"]').filter({ hasText: 'public-b.md' }).getAttribute('data-page-id');
     expect(bId).toBeTruthy();
     let releaseSecondRead!: () => void;
