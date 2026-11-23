@@ -20,6 +20,11 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
   await page.locator('[data-testid="admin-password-input"]').fill(admin.password);
   await page.locator('[data-testid="admin-login-submit"]').click();
   await expect(page.locator('.entry-shell')).toBeVisible();
+
+  await page.getByTestId('nav-public-wiki').click();
+  await expect(page).toHaveURL(/\/public\/wiki$/);
+  await expect(page.locator('.public-header')).toBeVisible();
+  await page.goto(`${admin.origin}/knowledge`);
   await page.getByTestId('kb-btn-public-wiki').click();
   await expect(page.getByTestId('public-publication-panel')).toBeVisible();
 
@@ -29,21 +34,31 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
   await expect(a).toBeVisible();
   await expect(c).toBeVisible();
   await expect(page.getByTestId('publication-page-row').filter({ hasText: 'acceptance.md' })).toHaveCount(0);
+
+  const selectAll = page.getByTestId('publication-select-all');
+  await selectAll.click();
+  await expect(a.getByRole('checkbox')).toBeChecked();
+  await expect(b.getByRole('checkbox')).toBeChecked();
+  await expect(c.getByRole('checkbox')).toBeChecked();
+  await selectAll.click();
+  await expect(a.getByRole('checkbox')).not.toBeChecked();
+  await expect(b.getByRole('checkbox')).not.toBeChecked();
+  await expect(c.getByRole('checkbox')).not.toBeChecked();
+
   await a.getByRole('checkbox').check();
-  await page.getByTestId('publication-preview').click();
+  await b.getByRole('checkbox').check();
+  await page.getByTestId('publication-batch-publish').click();
   await expect(page.getByTestId('publication-preview-revision')).toContainText('版本 0');
-  await expect(page.getByTestId('publication-preview-page-count')).toContainText('1');
+  await expect(page.getByTestId('publication-preview-page-count')).toContainText('2');
   await expect(page.getByTestId('publication-preview-content')).toContainText('Public A');
+  await expect(page.getByTestId('publication-preview-content')).toContainText('Public B');
   await expect(page.getByTestId('publication-preview-content')).not.toContainText('Private C');
   await page.getByTestId('publication-commit').click();
   await expect(page.getByTestId('publication-page-row').filter({ hasText: 'public-a.md' })).toContainText('已发布');
-
-  await b.getByRole('checkbox').check();
-  await page.getByTestId('publication-preview').click();
-  await page.getByTestId('publication-commit').click();
   await expect(page.getByTestId('publication-page-row').filter({ hasText: 'public-b.md' })).toContainText('已发布');
   await a.getByRole('checkbox').check();
-  await page.getByTestId('publication-preview').click();
+  await page.getByTestId('publication-batch-publish').click();
+  await expect(page.getByTestId('publication-preview-revision')).toContainText('版本 1');
   await page.getByTestId('publication-commit').click();
   await page.getByTestId('publication-site-enabled').click();
   await expect(page.getByTestId('publication-site-enabled')).toBeChecked();
@@ -86,7 +101,24 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
     await expect(visitor.getByTestId('public-wiki-page')).toContainText('Public B');
     await visitor.getByRole('link', { name: '图谱' }).click();
     await expect(visitor.getByTestId('public-graph')).toBeVisible();
-    await visitor.locator('.public-graph__canvas a').filter({ hasText: 'Public A' }).click();
+    const publicGraph = visitor.getByTestId('public-graph-canvas');
+    await expect(publicGraph).toBeVisible();
+    await expect(publicGraph).toHaveAttribute('data-node-count', '2');
+    await expect.poll(async () => Number(await publicGraph.getAttribute('data-zoom-scale'))).toBeGreaterThan(0);
+    const initialZoom = Number(await publicGraph.getAttribute('data-zoom-scale'));
+    await visitor.getByTestId('public-graph-zoom-out').click();
+    await expect.poll(async () => Number(await publicGraph.getAttribute('data-zoom-scale'))).toBeLessThan(initialZoom);
+    const zoomAfterButton = Number(await publicGraph.getAttribute('data-zoom-scale'));
+    await visitor.getByTestId('public-graph-zoom-in').click();
+    await expect.poll(async () => Number(await publicGraph.getAttribute('data-zoom-scale'))).toBeGreaterThan(zoomAfterButton);
+    const zoomAfterIn = Number(await publicGraph.getAttribute('data-zoom-scale'));
+    const canvasBox = await publicGraph.locator('canvas[role="img"]').boundingBox();
+    expect(canvasBox).toBeTruthy();
+    await visitor.mouse.move(canvasBox!.x + canvasBox!.width / 2, canvasBox!.y + canvasBox!.height / 2);
+    await visitor.mouse.wheel(0, 160);
+    await expect.poll(async () => Number(await publicGraph.getAttribute('data-zoom-scale'))).toBeLessThan(zoomAfterIn);
+    await visitor.getByTestId('public-graph-fit').click();
+    await visitor.getByTestId(`public-graph-page-${aId}`).click();
     await expect(visitor.getByTestId('public-wiki-page')).toContainText('Public A');
     await visitor.getByRole('link', { name: '图谱' }).click();
     await visitor.reload();
@@ -94,4 +126,17 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
     expect(publicRequests.length).toBeGreaterThan(0);
     expect(publicRequests.every((url) => url.startsWith('/api/public/'))).toBe(true);
   } finally { await anonymous.close(); }
+
+  await a.getByRole('checkbox').check();
+  await b.getByRole('checkbox').check();
+  const withdrawnPageId = await a.getAttribute('data-page-id');
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByTestId('publication-batch-withdraw').click();
+  await expect(a).toContainText('未发布');
+  await expect(b).toContainText('未发布');
+  const withdrawnVisitor = await browser.newPage({ ignoreHTTPSErrors: true });
+  try {
+    await withdrawnVisitor.goto(`${admin.origin}/public/wiki/${withdrawnPageId}`);
+    await expect(withdrawnVisitor.getByRole('alert')).toBeVisible();
+  } finally { await withdrawnVisitor.close(); }
 });

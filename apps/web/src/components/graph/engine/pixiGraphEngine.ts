@@ -73,6 +73,7 @@ export interface EngineCallbacks {
   onNodeClick?: (key: string, node: EngineNode) => void;
   onNodeDoubleClick?: (key: string, node: EngineNode) => void;
   onHoverChange?: (key: string | null) => void;
+  onZoom?: (scale: number) => void;
 }
 
 export interface EngineOptions {
@@ -364,6 +365,12 @@ export class PixiGraphEngine {
       if (this.sim && this.sim.alpha() > 0) this.sim.restart();
       this.resizeObserver?.observe(this.container);
     }
+  }
+
+  /** Change the viewport scale through the same d3-zoom path as mouse wheel/pinch. */
+  zoomBy(factor: number): void {
+    if (this.destroyed || !Number.isFinite(factor) || factor <= 0) return;
+    select(this.canvas).call(this.zoomBehavior.scaleBy, factor);
   }
 
   setData(nodes: EngineNode[], edges: EngineEdge[]): void {
@@ -1040,6 +1047,7 @@ export class PixiGraphEngine {
     this.stage.position.set(t.x, t.y);
     this.syncLabels();
     this.syncSelectionRing();
+    this.callbacks.onZoom?.(t.k);
   }
 
   /** 静默同步 d3-zoom 内部状态（不触发用户手势副作用） */

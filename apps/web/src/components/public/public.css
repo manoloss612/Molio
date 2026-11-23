@@ -17,11 +17,12 @@
 .public-markdown pre { overflow: auto; padding: 16px; border-radius: 10px; background: #eae9e2; }
 .public-markdown img { max-width: 100%; height: auto; border-radius: 8px; }
 .public-graph ul { list-style: none; padding: 0; margin: 20px 0; display: grid; gap: 10px; }
-.public-graph__canvas { width: 100%; min-height: 300px; max-height: 480px; border: 1px solid #e2e0d7; border-radius: 14px; background: radial-gradient(circle at center, #fff 0%, #f2f1eb 100%); }
-.public-graph__edges line { stroke: #a8b8a5; stroke-width: 2; }
-.public-graph__canvas a { cursor: pointer; }
-.public-graph__canvas circle { fill: #426d52; stroke: #fff; stroke-width: 4px; }
-.public-graph__canvas text { fill: #30372f; font-size: 13px; font-weight: 600; }
+.public-graph__viewport { position: relative; width: 100%; height: min(64vh, 640px); min-height: 360px; overflow: hidden; border: 1px solid #e2e0d7; border-radius: 14px; background: #fafafa; }
+.public-graph__viewport > canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.public-graph__controls { position: absolute; z-index: 30; top: 12px; right: 12px; display: flex; gap: 6px; }
+.public-graph__controls button { width: 36px; height: 36px; border: 1px solid rgba(40, 48, 40, .16); border-radius: 9px; color: #30372f; background: rgba(255,255,255,.9); box-shadow: 0 2px 8px rgba(0,0,0,.08); font-size: 20px; cursor: pointer; }
+.public-graph__controls button:hover { background: #fff; }
+.public-graph__empty { padding: 28px; border: 1px solid #e2e0d7; border-radius: 12px; color: #777b70; text-align: center; }
 .public-graph li { padding: 15px 18px; border: 1px solid #e2e0d7; border-radius: 12px; background: #fff; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .public-graph li a { font-weight: 650; }
 .public-graph li span { color: #7c8077; font-size: 13px; }
