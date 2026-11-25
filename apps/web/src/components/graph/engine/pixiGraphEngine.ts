@@ -16,8 +16,13 @@
  *     搜索 focusNode、设置面板 setForces/setStyle 等公共 API
  *   - hover 高亮节点与连线（焦点模式，hover 优先于搜索选中）；单击节点跳转文档；
  *     点击空白清除搜索选中；双击空白 fit
+ *   - trunk 模式（T2，设计 §4.2）：setTrunkData 把 hub+簇团+聚合边表示成常规
+ *     引擎节点/边——zoom/fit/snapshot/minimap/hover/脏标记协议全复用；簇团只是
+ *     「带 trunkCluster 标记的节点」（blob 半径/簇色/常显标签），聚合边是「带
+ *     trunkWeight 的边」（宽 ∝ log weight）。仿真用固定配方 TRUNK_FORCE（用户
+ *     forces 只作用全量图），几十对象同步 settle 后立即 fit——不跑收敛三段式。
  */
-import { Application, Container, Graphics, Text, Circle, Rectangle } from 'pixi.js';
+import { Application, Container, Graphics, Text, Circle, Rectangle, type ContainerChild } from 'pixi.js';
 import { computeExportRect, resolveExportScale, viewportWorldRect, type Bounds } from './exportImage';
 import {
   forceSimulation,
@@ -41,6 +46,12 @@ import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from 'd3-zo
 import { Group, Tween } from '@tweenjs/tween.js';
 import { NODE_TYPE_COLORS, type ForceParams, type ThemeColors } from '../types';
 import {
+  trunkBlobRadius,
+  trunkEdgeWidth,
+  trunkClusterColor,
+  type TrunkScene,
+} from '../trunkScene';
+import {
   clamp,
   easeCubicOut,
   dedupeEdges,
@@ -48,8 +59,12 @@ import {
   greedyLabelLayout,
   tileIsolatedNodes,
   SUPER_HUB_DEGREE,
+  collideRadiusValue,
+  COLLIDE_PAD,
   type GraphDegreeNode,
 } from './graphUtils';
+import { selectLabels, type LabelLodNode } from '../labelLod';
+import type { ExpansionPayload } from '../trunkExpand';
 
 // ── Public types ──
 
@@ -61,11 +76,15 @@ export interface EngineNode {
   nodeType?: string | null;
   /** Dead link placeholder node（未解析的 wikilink） */
   dead?: boolean;
+  /** trunk 模式：本节点是簇团（blob 渲染：半径 ∝ √size、簇色、标签常显） */
+  trunkCluster?: { size: number };
 }
 
 export interface EngineEdge {
   source: string;
   target: string;
+  /** trunk 展开 spoke（成员↔收起团）的真实边数：宽 ∝ log（trunkExpand.buildExpansion 产出） */
+  trunkWeight?: number;
 }
 
 export interface EngineCallbacks {
@@ -74,6 +93,10 @@ export interface EngineCallbacks {
   onNodeDoubleClick?: (key: string, node: EngineNode) => void;
   onHoverChange?: (key: string | null) => void;
   onZoom?: (scale: number) => void;
+  /** trunk 模式：单击簇团（H1 过渡期行为由宿主决定：切全量+框邻域） */
+  onTrunkClusterClick?: (clusterId: string) => void;
+  /** trunk 展开：点「收起」chip（H2）——宿主调 collapseTrunkCluster */
+  onTrunkCollapseClick?: (clusterId: string) => void;
 }
 
 export interface EngineOptions {
@@ -99,13 +122,16 @@ interface SimNode extends SimulationNodeDatum {
   linkCount: number;
   nodeType?: string | null;
   dead?: boolean;
+  /** trunk 模式：簇团标记（blob 渲染） */
+  trunkCluster?: { size: number };
   radius: number;
   /** 度数排名（0 = 最高），标签显隐预算用 */
   rank: number;
 }
 
 interface SimLink extends SimulationLinkDatum<SimNode> {
-  // source/target 由 forceLink 解析为 SimNode 对象
+  /** trunk 模式：聚合边真实权重（宽度 ∝ log2）；全量边恒 undefined */
+  trunkWeight?: number;
 }
 
 interface NodeRenderData {
@@ -121,10 +147,11 @@ interface NodeRenderData {
 
 interface LinkRenderData {
   simulationData: SimLink;
-  gfx: Graphics;
   color: string;
   alpha: number;
   active: boolean;
+  /** 边宽倍率：全量恒 1（=this.edgeWidth）；trunk 聚合边 = 1+log2(weight) */
+  widthMult: number;
 }
 
 type TweenNode = { update: (time: number) => void; stop: () => void };
@@ -161,11 +188,11 @@ const CLICK_MOVE_TOLERANCE = 4;
 const DRAG_THRESHOLD = 4;
 /** collide 迭代：静止时 3（质量优先），位移场期降到 1（拖拽降质） */
 const COLLIDE_ITERATIONS = 3;
-/** 标签显隐：屏幕半径阈值（太小不显示）+ 度数预算（候选池上限，实际可见数由碰撞检测决定） */
-const LABEL_MIN_SCREEN_RADIUS = 3;
+/** 标签 LOD（H2 统一规则 labelLod.ts）：屏幕直径阈值 + 同屏可见总数上限（防汤，代拍 B） */
+const LABEL_MIN_SCREEN_DIAMETER = 8;
+const LABEL_MAX_ONSCREEN = 60;
 /** 标签与节点顶部的屏幕间距（px，不随缩放变化） */
 const LABEL_GAP_SCREEN = 4;
-const LABEL_BUDGET = 150;
 /** 标签碰撞检测的四周留白（stage-local 单位） */
 const LABEL_PAD = 2;
 const K_MIN = 0.1;
@@ -177,11 +204,7 @@ const EXPORT_MARGIN_SCREEN = 48;
 const EXPORT_TARGET_LONG_EDGE = 2000;
 /** v6 配方：forceX/Y 谐波约束强度 —— 让长弹簧向心屈服，整体紧凑、局部由 collide 撑开 */
 const CONTAIN_STRENGTH = 0.06;
-/** v6 配方：collide 半径 = 绘制半径 × MULT + PAD —— 远看均布、放大后节点彼此分离（Obsidian 同款空气感） */
-const COLLIDE_RADIUS_MULT = 5;
-const COLLIDE_PAD = 4;
-/** collide 半径上限：防止度极高的超级 hub 产生非直觉的巨大排斥圈（见 collideRadius 注释） */
-const COLLIDE_MAX = 100;
+// collide 半径公式（×5+4 封顶 100）与 COLLIDE_PAD 已移 graphUtils（单一来源，mini-sim/worker 共用）
 /** manyBody 电荷分母下限：d<DISTANCE_MIN 时按 DISTANCE_MIN 计，封顶 1/d² 电荷爆（拖拽级联的节点瞬时重叠加速） */
 const DISTANCE_MIN = 20;
 /** 位移场期 collide 迭代降到 1（拖拽降质：collide 是每 tick 最大 CPU 成本） */
@@ -192,6 +215,24 @@ const DRAG_LINK_MULT = 0.4;
 const DRAG_ALPHA_TARGET = 0.2;
 /** 拖拽期 velocityDecay：拖拽与松手共用，吸收回弹能量；过高 → 蠕行缓慢，过低 → 弹跳剧烈 */
 const DRAG_VELOCITY_DECAY = 0.6;
+/** trunk 仿真固定配方（设计 §4.2 评审 #6：几十个对象的布局语义与全量图不同，
+ *  用户调的 forces 只为全量图生效）：强排斥撑开 + 中距弹簧 + 同步 settle 到位 */
+const TRUNK_FORCE = {
+  centerStrength: 0.1,
+  repelStrength: -800,
+  linkStrength: 0.4,
+  linkDistance: 140,
+  /** 同步 settle 上限 tick 数（~30 对象实际远小于此，毫秒级） */
+  settleTicks: 400,
+} as const;
+/** 聚合边权重查表的 pairKey 分隔符（与 daemon graph-communities 同款 NUL 转义写法——
+ *  别用裸 \x00 字节：源码会被工具判成二进制，grep 静默零命中） */
+const TRUNK_PAIR_SEP = '\u0000';
+/** 无焦点时的空邻居集（labelLod 入参，免每帧分配） */
+const NO_NEIGHBOURS: ReadonlySet<string> = new Set();
+/** 簇团单击派发延迟（ms）：给双击留出取消窗——双击簇团 no-op（T2 deferred minor）。
+ *  成员/hub 单击零延迟（打开文件铁律不等待）。 */
+const TRUNK_CLUSTER_CLICK_DEFER_MS = 250;
 
 export class PixiGraphEngine {
   private container: HTMLElement;
@@ -199,8 +240,12 @@ export class PixiGraphEngine {
   private canvas!: HTMLCanvasElement;
   private stage!: Container;
   private labelsLayer!: Container<Text>;
-  private nodesLayer!: Container<Graphics>;
+  /** 收起 chip 顶层（在成员/标签之上——chip 是展开态的主出口，被盖住等于没有） */
+  private chipsLayer!: Container<ContainerChild>;
+  private nodesLayer!: Container<ContainerChild>;
   private linkLayer!: Container<Graphics>;
+  /** P0-2：全部边共用这一个 Graphics（替代 per-link Graphics，23k 边 23k→1 显示对象） */
+  private edgesGfx!: Graphics;
   private selectionGfx!: Graphics;
 
   private theme: ThemeColors;
@@ -271,9 +316,47 @@ export class PixiGraphEngine {
   /** 移动降质：true 时隐藏标签 + collide→1 + minimap 暂停 */
   private motionMode = false;
 
+  // ── trunk 模式（T2）──
+  /** 当前处于 trunk 场景（setTrunkData 置位 / setData 复位）：渲染分支 + 力参/标签/回调路由 */
+  private trunkMode = false;
+
+  // ── trunk 展开/收起（H2，设计 §4.1）──
+  /** 当前 trunk 场景（collapse 重建聚合边 / chip 文案用；setTrunkData 存、setData 清） */
+  private trunkSceneRef: TrunkScene | null = null;
+  /** 展开时 blob 坐标缓存：收起回位（G：再展开复用由宿主缓存位置，blob 位由引擎记） */
+  private trunkBlobPos = new Map<string, { x: number; y: number }>();
+  /** 已展开簇：clusterId → 质心（chip 锚点 + appendTrunkMembers 的兜底锚） */
+  private trunkExpanded = new Map<string, { centroid: { x: number; y: number } }>();
+  /** 已展开簇的成员 key 集（收起移除用；重复注入幂等） */
+  private trunkExpandedMembers = new Map<string, Set<string>>();
+  /** 收起动画进行中的簇（applyCollapse 落地前阻止再次展开/追加） */
+  private trunkCollapsing = new Set<string>();
+  /** 收起动画完成定时器（destroy 清理） */
+  private trunkCollapseTimers = new Set<ReturnType<typeof setTimeout>>();
+  /** 各簇展开载荷（收起后给其他已展开簇重挂 spoke 用——pair 去重保证幂等） */
+  private trunkPayloads = new Map<string, ExpansionPayload>();
+  /** 收起 chip 显示对象（挂 chipsLayer 顶层；pointertap → onTrunkCollapseClick）+ 团心 sim 坐标（resize 重定位） */
+  private trunkChips = new Map<string, { root: Container; centroid: { x: number; y: number } }>();
+  /** 簇团单击的延迟派发定时器（双击取消窗） */
+  private trunkClickDefer: ReturnType<typeof setTimeout> | null = null;
+
   private renderListeners = new Set<() => void>();
   /** 上次同步标签 scale 的 k —— 标签恒定屏幕尺寸（scale=1/k），k 变化时才批量更新 */
   private lastLabelK = 0;
+
+  // ── P0-1 帧循环脏标记（失效协议，T2 trunk 渲染沿用）──
+  /** 几何动了（sim tick / 拖拽钉点 / 孤立重铺 / resize / nodeScale）→ 重写节点位置 + 重画边 */
+  private geometryDirty = true;
+  /** 只有变换动了（zoom/pan/fit/视口动画）→ 只同步标签 + minimap + 选中环，边几何不失效 */
+  private transformDirty = true;
+  /** 边样式动了（hover 边 alpha tween 逐帧变 / color 即时切）→ 只重画边 */
+  private edgesDirty = false;
+  /** 选中态变了（selectNode / 点空白清除）→ 只重画选中环 */
+  private selectionDirty = true;
+  /** hover tween 活动窗口的截止时刻（rAF 时钟）：期间帧必须照常上屏，过后可跳过 render */
+  private tweenUntil = 0;
+  /** getSnapshot 的节点数组缓冲（P0-3 搭车）：长度不变时原地改写，消 minimap 每帧大库对象分配 */
+  private snapshotBuf: { key: string; x: number; y: number }[] = [];
 
   private constructor(container: HTMLElement, opts: EngineOptions) {
     this.container = container;
@@ -323,10 +406,19 @@ export class PixiGraphEngine {
     this.linkLayer = new Container<Graphics>({ zIndex: 1, isRenderGroup: true, sortableChildren: true });
     this.nodesLayer = new Container<Graphics>({ zIndex: 2, isRenderGroup: true });
     this.labelsLayer = new Container<Text>({ zIndex: 3, isRenderGroup: true });
-    this.stage.addChild(this.linkLayer, this.nodesLayer, this.labelsLayer);
+    // 收起 chip 独立顶层（H2 验收反馈：与成员同层时，后续批次的成员会盖住团心的 chip）
+    this.chipsLayer = new Container<ContainerChild>({ zIndex: 4, isRenderGroup: true });
+    this.stage.addChild(this.linkLayer, this.nodesLayer, this.labelsLayer, this.chipsLayer);
 
     this.selectionGfx = new Graphics();
     this.nodesLayer.addChild(this.selectionGfx);
+
+    // edgesGfx 必须在首帧前存在：rAF 循环（下方启动）早于首次 rebuildRendering，
+    // 而 renderFrame 每帧都调 redrawEdges——否则首帧 TypeError 且抛点在 rAF 重新
+    // 排队之前，整个渲染循环永久死亡（实测：相机/搜索 4 个 spec 超时的根因）。
+    // selectionGfx 同款模式：init 建一份，rebuildRendering 清层后重建。
+    this.edgesGfx = new Graphics({ interactive: false, eventMode: 'none' });
+    this.linkLayer.addChild(this.edgesGfx);
 
     this.bindZoomAndDrag();
     this.bindNativeEvents();
@@ -337,6 +429,14 @@ export class PixiGraphEngine {
       this.width = this.container.clientWidth;
       this.height = this.container.clientHeight;
       this.app.renderer.resize(this.width, this.height);
+      // resize 后必须立即补一帧：renderer.resize 只重设 canvas 尺寸、不重绘，而
+      // ResizeObserver 回调在 rAF 之后、上屏之前执行——清空的 backing store 会
+      // 直接合成上屏。引擎 background 不透明 → WebGL context alpha:false →
+      // 清空帧 = 不透明纯黑。拖拽侧边栏（目录框/停靠对话面板，逐帧 resize）时
+      // 表现为图谱持续闪黑屏；窗口 resize 同理。Pixi 官方 ResizePlugin 的
+      // resize() 就是 resize 后紧跟 render() 的成对模式。
+      this.geometryDirty = true; // cx/cy 变 → 所有 stage-local 坐标全变（#411 同步补帧保留）
+      this.app.renderer.render(this.stage);
     });
     this.resizeObserver.observe(this.container);
   }
@@ -375,7 +475,474 @@ export class PixiGraphEngine {
 
   setData(nodes: EngineNode[], edges: EngineEdge[]): void {
     if (this.destroyed) return;
+    this.trunkMode = false;
+    this.buildAndRender(
+      nodes,
+      edges.map((e) => ({ ...e })),
+      null,
+    );
+  }
 
+  /**
+   * 进入/重建 trunk 场景（T2，设计 §4.2）：hub = 常规节点（真实度数 → 大半径），
+   * 簇团 = blob 节点（trunkCluster 标记：半径 4+√size、簇色、标签常显），聚合边带
+   * trunkWeight（宽 1+log2）。固定力参 TRUNK_FORCE + 同步 settle + 立即 fit——
+   * 几十个对象毫秒级到位，不跑「先落位、收敛后再取景」的三段式。
+   */
+  setTrunkData(scene: TrunkScene, opts?: { preserveViewport?: boolean }): void {
+    if (this.destroyed) return;
+    this.trunkMode = true;
+    this.trunkSceneRef = scene;
+    // 场景重建 = 展开态清零（刷新保态由宿主 matchExpansionsOnRefresh 后重注入；chip 随层销毁）
+    this.trunkBlobPos.clear();
+    this.trunkExpanded.clear();
+    this.trunkExpandedMembers.clear();
+    this.trunkPayloads.clear();
+    this.trunkChips.clear();
+    const nodes: EngineNode[] = [
+      ...scene.hubs.map((h) => ({
+        key: h.key,
+        label: h.label,
+        path: h.path,
+        linkCount: h.linkCount,
+        nodeType: h.nodeType,
+      })),
+      ...scene.clusters.map((c) => ({
+        key: c.id,
+        label: c.label,
+        path: '',
+        linkCount: 0,
+        trunkCluster: { size: c.size },
+      })),
+    ];
+    const edges: EngineEdge[] = scene.links.map((l) => ({ source: l.source, target: l.target }));
+    this.buildAndRender(nodes, edges, scene, opts?.preserveViewport ?? false);
+  }
+
+  /**
+   * 展开一簇（H2，设计 §4.1）：blob 移除 → batchKeys 成员增量注入（位置由外部给：worker
+   * 布局质心对齐平移，或 mini-sim）；payload.edges 里两端此刻都在场的边一并注入（spoke 带
+   * weight、宽 ∝ log）。**不重启 sim、不 re-settle**（alpha 保持 0——反目标「整图跳动」的
+   * 防线；拖拽照常唤醒物理）。质心留「收起」chip。opts.animate 是 Task 6 过渡动画的钩子
+   * （本任务即时落位）。
+   */
+  expandTrunkCluster(
+    clusterId: string,
+    payload: ExpansionPayload,
+    positions: ReadonlyMap<string, { x: number; y: number }>,
+    batchKeys: string[],
+    opts?: { animate?: boolean },
+  ): boolean {
+    if (this.destroyed || !this.trunkMode) return false;
+    if (this.trunkCollapsing.has(clusterId)) return false; // 收起动画进行中
+    const blob = this.nodeById.get(clusterId);
+    if (!blob || !blob.trunkCluster) return false; // 不存在或已展开
+    const centroid = { x: blob.x ?? 0, y: blob.y ?? 0 };
+    this.trunkBlobPos.set(clusterId, centroid);
+    this.trunkPayloads.set(clusterId, payload);
+    this.pruneEdgesBy((id) => id === clusterId); // 聚合边撤 + 其他簇指向本 blob 的 spoke（由本簇真实边取代）
+    this.removeSimNode(clusterId);
+    this.addExpansionMembers(clusterId, payload, positions, batchKeys, centroid);
+    this.addExpansionEdges(payload);
+    this.addTrunkChip(clusterId, centroid);
+    // 过渡动画（设计 §4.1：300-400ms 成员从质心 stagger 外扩）；motionMode 降质 = 直接落位
+    if (opts?.animate !== false && !this.motionMode) {
+      this.animateExpansionFrom(clusterId, batchKeys, positions, centroid);
+    }
+    this.afterTrunkMutation();
+    return true;
+  }
+
+  /** 后续批次流式注入（巨簇分批，代拍 F）：只加节点 + 新变完整的边；落位后 150ms 淡入。 */
+  appendTrunkMembers(
+    clusterId: string,
+    payload: ExpansionPayload,
+    positions: ReadonlyMap<string, { x: number; y: number }>,
+    batchKeys: string[],
+  ): boolean {
+    if (this.destroyed || !this.trunkMode) return false;
+    if (this.trunkCollapsing.has(clusterId)) return false;
+    const state = this.trunkExpanded.get(clusterId);
+    if (!state) return false; // 未展开（可能已被收起/场景重建）
+    this.trunkPayloads.set(clusterId, payload);
+    this.addExpansionMembers(clusterId, payload, positions, batchKeys, state.centroid);
+    this.addExpansionEdges(payload);
+    if (!this.motionMode) this.animateBatchFadeIn(clusterId, batchKeys);
+    this.afterTrunkMutation();
+    return true;
+  }
+
+  /**
+   * 收起一簇：成员 250ms tween 回质心淡出、blob 于质心淡入（motionMode 直接落位）；
+   * 动画完成后 applyCollapse 真正撤成员/重建聚合边。聚合边按 scene.links 重建（对端
+   * 不在场的跳过——对方簇仍展开时其真实边/spoke 语义自洽），其他已展开簇的 spoke 借载荷
+   * 重挂（pair 去重幂等）。
+   */
+  collapseTrunkCluster(clusterId: string): boolean {
+    if (this.destroyed || !this.trunkMode) return false;
+    if (this.trunkCollapsing.has(clusterId)) return false; // 收起动画进行中：重入会双份重建聚合边
+    const members = this.trunkExpandedMembers.get(clusterId);
+    const blobPos = this.trunkBlobPos.get(clusterId);
+    if (!members || !blobPos || !this.trunkSceneRef?.clusters.some((c) => c.id === clusterId)) return false;
+    if (this.motionMode) {
+      this.applyCollapse(clusterId, members);
+      return true;
+    }
+    // blob 立即回位（alpha 0 淡入），成员向质心收拢淡出
+    const blobRd = this.restoreBlobNode(clusterId);
+    if (blobRd) blobRd.gfx.alpha = 0;
+    this.trunkCollapsing.add(clusterId);
+    const tweenKey = `collapse:${clusterId}`;
+    this.tweens.get(tweenKey)?.stop();
+    const group = new Group();
+    const chip = this.trunkChips.get(clusterId);
+    for (const key of members) {
+      const node = this.nodeById.get(key);
+      const rd = this.nodeRenderData.find((r) => r.simulationData.id === key);
+      if (!node || !rd || node.x == null || node.y == null) continue;
+      const from = { x: node.x, y: node.y };
+      const holder = { t: 0 };
+      group.add(
+        new Tween(holder)
+          .to({ t: 1 }, 250)
+          .onUpdate(() => {
+            const e = easeCubicOut(holder.t);
+            node.x = from.x + (blobPos.x - from.x) * e;
+            node.y = from.y + (blobPos.y - from.y) * e;
+            rd.gfx.alpha = 1 - holder.t;
+            this.geometryDirty = true;
+          }),
+      );
+    }
+    if (blobRd) {
+      const holder = { t: 0 };
+      group.add(
+        new Tween(holder)
+          .to({ t: 1 }, 250)
+          .onUpdate(() => {
+            blobRd.gfx.alpha = holder.t;
+          }),
+      );
+    }
+    if (chip) {
+      const holder = { t: 0 };
+      group.add(
+        new Tween(holder)
+          .to({ t: 1 }, 150)
+          .onUpdate(() => {
+            chip.root.alpha = 1 - holder.t;
+          }),
+      );
+    }
+    group.getAll().forEach((tw) => tw.start());
+    this.tweens.set(tweenKey, makeTweenNode(group));
+    this.tweenUntil = Math.max(this.tweenUntil, performance.now() + 350);
+    const timer = setTimeout(() => {
+      this.trunkCollapseTimers.delete(timer);
+      this.applyCollapse(clusterId, members);
+    }, 280);
+    this.trunkCollapseTimers.add(timer);
+    return true;
+  }
+
+  /** e2e/调试：当前展开簇 id 列表。 */
+  getTrunkExpandedClusters(): string[] {
+    return [...this.trunkExpanded.keys()];
+  }
+
+  /** e2e 点 chip 用：收起 chip 的 canvas 内 CSS px 坐标（测试自行加 getBoundingClientRect）。 */
+  getTrunkCollapseChipPos(clusterId: string): { sx: number; sy: number } | null {
+    const chip = this.trunkChips.get(clusterId);
+    if (!chip) return null;
+    const t = this.currentTransform;
+    return { sx: chip.root.x * t.k + t.x, sy: chip.root.y * t.k + t.y };
+  }
+
+  // ── trunk 展开的私有机器 ──
+
+  private addExpansionMembers(
+    clusterId: string,
+    payload: ExpansionPayload,
+    positions: ReadonlyMap<string, { x: number; y: number }>,
+    batchKeys: string[],
+    centroid: { x: number; y: number },
+  ): void {
+    const memberSet = this.trunkExpandedMembers.get(clusterId) ?? new Set<string>();
+    this.trunkExpandedMembers.set(clusterId, memberSet);
+    this.trunkExpanded.set(clusterId, { centroid });
+    const byKey = new Map(payload.memberNodes.map((m) => [m.key, m] as const));
+    batchKeys.forEach((key, i) => {
+      if (this.nodeById.has(key) || memberSet.has(key)) return; // 幂等
+      const m = byKey.get(key);
+      if (!m) return;
+      const p = positions.get(key);
+      // 缺位兜底：质心外黄金角散布（确定性），别让成员叠在质心上
+      const ring = 24 * Math.sqrt(i + 1);
+      const ang = Math.PI * (3 - Math.sqrt(5)) * i;
+      const node: SimNode = {
+        id: key,
+        text: m.label,
+        path: m.path,
+        linkCount: m.linkCount,
+        nodeType: m.nodeType ?? null,
+        dead: false,
+        radius: this.radiusOf({ linkCount: m.linkCount }),
+        rank: 0,
+        x: p ? p.x : centroid.x + ring * Math.cos(ang),
+        y: p ? p.y : centroid.y + ring * Math.sin(ang),
+      };
+      this.nodes.push(node);
+      this.nodeById.set(key, node);
+      memberSet.add(key);
+      this.nodeRenderData.push(this.makeNodeRenderData(node));
+    });
+  }
+
+  /** 注入 payload 里「两端此刻都在场」的边（真实边优先于 spoke——去重按 pair，先到先得）。 */
+  private addExpansionEdges(payload: ExpansionPayload): void {
+    const existing = new Set<string>();
+    for (const l of this.links) {
+      const s = (l.source as SimNode).id;
+      const t = (l.target as SimNode).id;
+      existing.add(s < t ? `${s}${TRUNK_PAIR_SEP}${t}` : `${t}${TRUNK_PAIR_SEP}${s}`);
+    }
+    for (const e of payload.edges) {
+      const s = this.nodeById.get(e.source);
+      const t = this.nodeById.get(e.target);
+      if (!s || !t) continue; // 对端不在场（后续批次补 / 收起簇以外的对象）
+      const pair = e.source < e.target ? `${e.source}${TRUNK_PAIR_SEP}${e.target}` : `${e.target}${TRUNK_PAIR_SEP}${e.source}`;
+      if (existing.has(pair)) continue;
+      existing.add(pair);
+      const link: SimLink = { source: s, target: t, trunkWeight: e.weight };
+      this.links.push(link);
+      this.linkRenderData.push(this.makeLinkRenderData(link));
+    }
+  }
+
+  /** 按 predicate 撤边（this.links 与 linkRenderData 同步过滤；边绘制走 edgesGfx 整体重画）。 */
+  private pruneEdgesBy(shouldPrune: (nodeId: string) => boolean): void {
+    const keepLinks: SimLink[] = [];
+    const keepRd: LinkRenderData[] = [];
+    for (let i = 0; i < this.links.length; i++) {
+      const l = this.links[i]!;
+      const s = l.source as SimNode;
+      const t = l.target as SimNode;
+      if (shouldPrune(s.id) || shouldPrune(t.id)) continue;
+      keepLinks.push(l);
+      keepRd.push(this.linkRenderData[i]!);
+    }
+    this.links = keepLinks;
+    this.linkRenderData = keepRd;
+  }
+
+  private removeSimNode(key: string): void {
+    const idx = this.nodeRenderData.findIndex((rd) => rd.simulationData.id === key);
+    if (idx >= 0) {
+      const rd = this.nodeRenderData[idx]!;
+      rd.gfx.destroy();
+      rd.label.destroy();
+      this.nodeRenderData.splice(idx, 1);
+    }
+    this.nodes = this.nodes.filter((n) => n.id !== key);
+    this.nodeById.delete(key);
+  }
+
+  private addTrunkChip(clusterId: string, centroid: { x: number; y: number }): void {
+    const cluster = this.trunkSceneRef?.clusters.find((c) => c.id === clusterId);
+    const root = new Container({ interactive: true, eventMode: 'static' });
+    root.hitArea = new Circle(0, 0, 18);
+    root.cursor = 'pointer';
+    const circle = new Graphics()
+      .circle(0, 0, 13)
+      .fill({ color: this.theme.bg, alpha: 0.95 })
+      .stroke({ width: 2, color: trunkClusterColor(clusterId) });
+    const label = new Text({
+      interactive: false,
+      eventMode: 'none',
+      text: `✕ ${cluster?.label ?? clusterId}`,
+      anchor: { x: 0.5, y: 0.5 },
+      style: { fontSize: 12, fill: this.theme.label, fontFamily: LABEL_FONT },
+      resolution: window.devicePixelRatio * 4,
+    });
+    root.addChild(circle, label);
+    root.position.set(centroid.x + this.width / 2, centroid.y + this.height / 2);
+    root.on('pointertap', () => {
+      if (!this.dragging) this.callbacks.onTrunkCollapseClick?.(clusterId);
+    });
+    this.chipsLayer.addChild(root);
+    this.trunkChips.set(clusterId, { root, centroid: { x: centroid.x, y: centroid.y } });
+  }
+
+  private removeTrunkChip(clusterId: string): void {
+    const chip = this.trunkChips.get(clusterId);
+    if (!chip) return;
+    this.trunkChips.delete(clusterId);
+    chip.root.destroy({ children: true });
+  }
+
+  /** 展开过渡（设计 §4.1）：成员从质心 350ms easeCubicOut 外扩 + 淡入，stagger 3ms/人封顶 150ms。 */
+  private animateExpansionFrom(
+    clusterId: string,
+    batchKeys: string[],
+    finalPos: ReadonlyMap<string, { x: number; y: number }>,
+    centroid: { x: number; y: number },
+  ): void {
+    const tweenKey = `expand:${clusterId}`;
+    this.tweens.get(tweenKey)?.stop();
+    const byId = new Map(this.nodeRenderData.map((rd) => [rd.simulationData.id, rd] as const));
+    const group = new Group();
+    let maxEnd = 0;
+    batchKeys.forEach((key, i) => {
+      const node = this.nodeById.get(key);
+      const rd = byId.get(key);
+      const to = finalPos.get(key);
+      if (!node || !rd || !to) return;
+      const delay = Math.min(i * 3, 150);
+      node.x = centroid.x; // 起点钉质心，tween 拉向落位
+      node.y = centroid.y;
+      rd.gfx.alpha = 0;
+      const holder = { t: 0 };
+      group.add(
+        new Tween(holder)
+          .to({ t: 1 }, 350)
+          .delay(delay)
+          .onUpdate(() => {
+            const e = easeCubicOut(holder.t);
+            node.x = centroid.x + (to.x - centroid.x) * e;
+            node.y = centroid.y + (to.y - centroid.y) * e;
+            rd.gfx.alpha = holder.t;
+            this.geometryDirty = true;
+          }),
+      );
+      maxEnd = Math.max(maxEnd, delay + 350);
+    });
+    group.getAll().forEach((tw) => tw.start());
+    this.tweens.set(tweenKey, makeTweenNode(group));
+    this.tweenUntil = Math.max(this.tweenUntil, performance.now() + maxEnd + 100);
+  }
+
+  /** 后续批次淡入（150ms，位置已在落位——只动 alpha，不占几何重画）。 */
+  private animateBatchFadeIn(clusterId: string, batchKeys: string[]): void {
+    const byId = new Map(this.nodeRenderData.map((rd) => [rd.simulationData.id, rd] as const));
+    const group = new Group();
+    for (const key of batchKeys) {
+      const rd = byId.get(key);
+      if (!rd) continue;
+      rd.gfx.alpha = 0;
+      const holder = { t: 0 };
+      group.add(
+        new Tween(holder)
+          .to({ t: 1 }, 150)
+          .onUpdate(() => {
+            rd.gfx.alpha = holder.t;
+          }),
+      );
+    }
+    if (group.getAll().length === 0) return;
+    group.getAll().forEach((tw) => tw.start());
+    this.tweens.set(`expand:${clusterId}`, makeTweenNode(group)); // 覆写已完结的首批组
+    this.tweenUntil = Math.max(this.tweenUntil, performance.now() + 250);
+  }
+
+  /** 收起的实际落地（动画完结后）：撤成员/重建聚合边/重挂他簇 spoke。 */
+  private applyCollapse(clusterId: string, members: Set<string>): void {
+    this.trunkCollapsing.delete(clusterId);
+    for (const key of members) this.removeSimNode(key);
+    this.pruneEdgesBy((id) => members.has(id));
+    this.trunkExpandedMembers.delete(clusterId);
+    this.trunkBlobPos.delete(clusterId);
+    this.trunkExpanded.delete(clusterId);
+    this.removeTrunkChip(clusterId);
+    this.restoreBlobNode(clusterId); // 幂等：动画路径已提前恢复则跳过
+    // 本簇聚合边重建（hub/其他 blob 在场的）；按 pair 去重——重入/他簇 spoke 重挂路径
+    // 可能与 scene.links 撞对（终审 minor：双击 chip 曾双份重建）
+    const seenPairs = new Set(this.links.map((l) => {
+      const s = (l.source as SimNode).id;
+      const t = (l.target as SimNode).id;
+      return s < t ? `${s}${TRUNK_PAIR_SEP}${t}` : `${t}${TRUNK_PAIR_SEP}${s}`;
+    }));
+    for (const l of this.trunkSceneRef?.links ?? []) {
+      if (l.source !== clusterId && l.target !== clusterId) continue;
+      const other = l.source === clusterId ? l.target : l.source;
+      if (!this.nodeById.has(other) || other === clusterId) continue;
+      const pair = clusterId < other ? `${clusterId}${TRUNK_PAIR_SEP}${other}` : `${other}${TRUNK_PAIR_SEP}${clusterId}`;
+      if (seenPairs.has(pair)) continue;
+      seenPairs.add(pair);
+      const link: SimLink = {
+        source: this.nodeById.get(clusterId)!,
+        target: this.nodeById.get(other)!,
+        trunkWeight: l.weight,
+      };
+      this.links.push(link);
+      this.linkRenderData.push(this.makeLinkRenderData(link));
+    }
+    // 其他已展开簇的 spoke 现在能落回本 blob（幂等去重，真实边优先）
+    for (const [otherId, otherPayload] of this.trunkPayloads) {
+      if (otherId === clusterId) continue;
+      this.addExpansionEdges(otherPayload);
+    }
+    this.afterTrunkMutation();
+  }
+
+  /** blob 回 trunkBlobPos 缓存位（不跳位）。已存在（动画路径提前恢复）→ null。 */
+  private restoreBlobNode(clusterId: string): NodeRenderData | null {
+    if (this.nodeById.has(clusterId)) return null;
+    const blobPos = this.trunkBlobPos.get(clusterId);
+    const cluster = this.trunkSceneRef?.clusters.find((c) => c.id === clusterId);
+    if (!blobPos || !cluster) return null;
+    const blob: SimNode = {
+      id: clusterId,
+      text: cluster.label,
+      path: '',
+      linkCount: 0,
+      trunkCluster: { size: cluster.size },
+      radius: this.radiusOf({ linkCount: 0, trunkCluster: { size: cluster.size } }),
+      rank: 0,
+      x: blobPos.x,
+      y: blobPos.y,
+    };
+    this.nodes.push(blob);
+    this.nodeById.set(clusterId, blob);
+    const rd = this.makeNodeRenderData(blob);
+    this.nodeRenderData.push(rd);
+    return rd;
+  }
+
+  /** 展开/收起/批次注入的公共收尾：选择残留守卫 + 邻域/度数重算 + 脏标记 + 全量重绘。 */
+  private afterTrunkMutation(): void {
+    if (this.selectedId !== null && !this.nodeById.has(this.selectedId)) {
+      this.selectedId = null;
+      this.selectionDirty = true;
+    }
+    if (this.hoveredNodeId !== null && !this.nodeById.has(this.hoveredNodeId)) this.hoveredNodeId = null;
+    this.recomputeAdjacencyAndRank();
+    this.lastLabelK = 0; // 新标签 scale=1：强制按当前 k 重同步全量标签
+    this.geometryDirty = true;
+    this.updateFocusAndRender();
+  }
+
+  /** 退回全量（setData 会隐式调用；显式调用用于宿主在 setData 前清理） */
+  clearTrunk(): void {
+    this.trunkMode = false;
+  }
+
+  getTrunkMode(): boolean {
+    return this.trunkMode;
+  }
+
+  /** 高亮某簇（搜索命中簇名）：语义=选中该 trunk 对象（选中环+邻域高亮+其余压暗）。null 清除。 */
+  highlightTrunkCluster(id: string | null): boolean {
+    if (id === null) {
+      this.selectedId = null;
+      this.selectionDirty = true;
+      this.updateFocusAndRender();
+      return true;
+    }
+    return this.selectNode(id);
+  }
+
+  /** setData/setTrunkData 共用主体：SimNode/SimLink 构建 + rebuild + 首 fit（trunk 另做同步 settle）。 */
+  private buildAndRender(nodes: EngineNode[], edges: EngineEdge[], trunk: TrunkScene | null, preserveViewport = false): void {
     // 上一批节点（此刻 this.nodeById 还是旧的）——用来给同名节点播种坐标。
     // 读的是「用户眼前这份布局」而非某个初始快照：布局被拖过、平移过，都该被继承。
     const prevNodes = this.inheritPositions ? this.nodeById : null;
@@ -392,6 +959,7 @@ export class PixiGraphEngine {
         linkCount: n.linkCount,
         nodeType: n.nodeType ?? null,
         dead: n.dead,
+        trunkCluster: n.trunkCluster,
         radius: this.radiusOf(n),
         rank: 0,
         // 老节点从原位继续仿真（刷新只微调，不重炸）；新节点不给坐标，
@@ -406,29 +974,47 @@ export class PixiGraphEngine {
     this.nodes = simNodes;
     this.nodeById = nodeById;
 
+    // 数据集更换后，指向已不存在 key 的选择/悬停必须清除——否则 focusId 永不命中，
+    // updateFocus 会把全图压进焦点淡出档（trunk 选中簇 c1 → 切全量后全图压暗的串味，
+    // 终审 Important-2；同一防线也覆盖「筛选滤掉已选节点」的既有残留路径）
+    if (this.selectedId !== null && !nodeById.has(this.selectedId)) this.selectedId = null;
+    if (this.hoveredNodeId !== null && !nodeById.has(this.hoveredNodeId)) this.hoveredNodeId = null;
+
+    const weightByPair = new Map<string, number>();
+    if (trunk) {
+      for (const l of trunk.links) {
+        weightByPair.set(l.source < l.target ? `${l.source}${TRUNK_PAIR_SEP}${l.target}` : `${l.target}${TRUNK_PAIR_SEP}${l.source}`, l.weight);
+      }
+    }
     const simLinks: SimLink[] = dedupeEdges(edges, (k) => nodeById.has(k)).map((e) => ({
       source: nodeById.get(e.source)!,
       target: nodeById.get(e.target)!,
+      trunkWeight: trunk
+        ? weightByPair.get(e.source < e.target ? `${e.source}${TRUNK_PAIR_SEP}${e.target}` : `${e.target}${TRUNK_PAIR_SEP}${e.source}`) ?? 1
+        : undefined,
     }));
     this.links = simLinks;
 
-    const adjacency = new Map<string, Set<string>>();
-    for (const n of simNodes) adjacency.set(n.id, new Set());
-    for (const l of simLinks) {
-      const s = l.source as SimNode;
-      const t = l.target as SimNode;
-      adjacency.get(s.id)!.add(t.id);
-      adjacency.get(t.id)!.add(s.id);
-    }
-    this.adjacency = adjacency;
-    const byDegree = [...simNodes].sort(
-      (a, b) => (adjacency.get(b.id)?.size ?? 0) - (adjacency.get(a.id)?.size ?? 0),
-    );
-    byDegree.forEach((n, i) => {
-      n.rank = i;
-    });
+    this.recomputeAdjacencyAndRank();
 
     this.rebuildRendering();
+
+    if (trunk) {
+      // trunk：几十对象同步 settle（毫秒级）+ 立即 fit——设计 §4.2「秒级收敛 + 单次取景」，
+      // 不走全量的「首 fit + 1.5s refit」三段式（reframeAfterSettle 也不在此路径）。
+      // preserveViewport（H2 刷新保态）：继承坐标微调后不 refit——视口永不因后台刷新重置
+      const sim = this.sim;
+      if (sim) {
+        let ticks = 0;
+        while (sim.alpha() > sim.alphaMin() && ticks++ < TRUNK_FORCE.settleTicks) sim.tick();
+        sim.alpha(0);
+        sim.stop();
+      }
+      if (!preserveViewport) this.fitView({ animate: false });
+      this.hasFitFirstLayout = true;
+      if (this.refitTimer) clearTimeout(this.refitTimer);
+      return;
+    }
 
     if (!this.hasFitFirstLayout) {
       this.fitView();
@@ -444,6 +1030,7 @@ export class PixiGraphEngine {
     this.selectedId = null;
     this.hoveredNodeId = null;
     this.hasFitFirstLayout = false;
+    this.selectionDirty = true; // #415 deferred minor 归位：清选中也要重画选中环（否则残影留到下一脏帧）
     // 只在紧随其后的那次 setData 生效（setData 读取后立刻复位）。
     // 防御性：当前切库会连图谱页一起卸载（引擎本该新建、无缓存），这行是「resetPositions
     // 的语义 = 上下文已换、别继承」的自洽保证——将来若图谱页改成跨库常驻，它就是唯一防线。
@@ -488,6 +1075,9 @@ export class PixiGraphEngine {
 
   setForces(f: ForceParams): void {
     this.forces = { ...f };
+    // trunk 仿真用固定配方（设计 §4.2 评审 #6）：用户力参先存着，退回全量后的
+    // rebuild（setData → rebuildRendering 读 this.forces）自然生效
+    if (this.trunkMode) return;
     const sim = this.sim;
     if (!sim) return;
     sim.force<ForceManyBody<SimNode>>('charge')?.strength(f.repelStrength);
@@ -505,15 +1095,24 @@ export class PixiGraphEngine {
     if (style.theme) {
       this.theme = style.theme;
       this.app.renderer.background.color = style.theme.bg;
+      // P0-1 失效协议：redrawAllNodes 只重写节点 Graphics 上下文与 l.color，不触发
+      // 渲染——空闲帧会停在旧配色，必须自己标脏（选中环边框色也换了）
+      this.edgesDirty = true; // 边色随边重画生效
+      this.selectionDirty = true;
+      this.transformDirty = true; // 强制下一帧 render
     }
     if (style.nodeScale !== undefined) this.nodeScale = style.nodeScale;
-    if (style.edgeWidth !== undefined) this.edgeWidth = style.edgeWidth;
+    if (style.edgeWidth !== undefined) {
+      this.edgeWidth = style.edgeWidth;
+      this.edgesDirty = true; // 边宽只在 redrawEdges 重画时生效
+    }
 
     if (style.nodeScale !== undefined) {
       for (const n of this.nodeById.values()) {
-        n.radius = this.radiusOf({ linkCount: n.linkCount, dead: n.dead });
+        n.radius = this.radiusOf({ linkCount: n.linkCount, dead: n.dead, trunkCluster: n.trunkCluster });
       }
       this.sim?.force<ForceCollide<SimNode>>('collide')?.radius(collideRadius);
+      this.geometryDirty = true; // 标签 y 偏移依赖 radius，几何要重写
     }
     this.redrawAllNodes();
   }
@@ -565,6 +1164,7 @@ export class PixiGraphEngine {
     if (this.destroyed) return false;
     if (!this.nodeById.has(key)) return false;
     this.selectedId = key;
+    this.selectionDirty = true;
     this.updateFocusAndRender();
     return true;
   }
@@ -602,12 +1202,39 @@ export class PixiGraphEngine {
     };
   }
 
+  /** e2e/探针观测口：当前可见标签数（统一 LOD 规则的防汤断言用） */
+  getVisibleLabelCount(): number {
+    let count = 0;
+    for (const rd of this.nodeRenderData) {
+      if (rd.label.visible) count++;
+    }
+    return count;
+  }
+
+  /** e2e 观测口：当前边总数（跨簇 spoke/真实边在场性的回归断言用，终审 #3） */
+  getLinkCount(): number {
+    return this.links.length;
+  }
+
   /** Minimap / e2e 快照：节点位置 + 视口（simulation 坐标） */
   getSnapshot(): GraphSnapshot | null {
     if (this.nodes.length === 0) return null;
     const t = this.currentTransform;
+    // P0-3：数组原地复用——长度一致就按索引改写既有元素（消费方 Minimap 同步读、不持引用，
+    // 原地改写安全）；换图（setData）必然长度变化走重建。大库省掉每次 6500+ 对象分配。
+    if (this.snapshotBuf.length !== this.nodes.length) {
+      this.snapshotBuf = this.nodes.map((n) => ({ key: n.id, x: n.x ?? 0, y: n.y ?? 0 }));
+    } else {
+      for (let i = 0; i < this.nodes.length; i++) {
+        const b = this.snapshotBuf[i]!;
+        const n = this.nodes[i]!;
+        b.key = n.id;
+        b.x = n.x ?? 0;
+        b.y = n.y ?? 0;
+      }
+    }
     return {
-      nodes: this.nodes.map((n) => ({ key: n.id, x: n.x ?? 0, y: n.y ?? 0 })),
+      nodes: this.snapshotBuf,
       view: {
         x: (0 - t.x) / t.k - this.width / 2,
         y: (0 - t.y) / t.k - this.height / 2,
@@ -687,6 +1314,9 @@ export class PixiGraphEngine {
     this.destroyed = true;
     if (this.refitTimer) clearTimeout(this.refitTimer);
     if (this.hoverLingerTimer) clearTimeout(this.hoverLingerTimer);
+    if (this.trunkClickDefer) clearTimeout(this.trunkClickDefer);
+    for (const timer of this.trunkCollapseTimers) clearTimeout(timer);
+    this.trunkCollapseTimers.clear();
     this.pendingReframe = null;
     this.viewportAnim = null;
     this.tweens.forEach((t) => t.stop());
@@ -704,6 +1334,7 @@ export class PixiGraphEngine {
       // 这里只把标签从舞台摘除（Container 级），纹理交给管道自己的销毁清扫。
       try {
         this.labelsLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
+        this.chipsLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
         this.nodeRenderData = [];
       } catch (err) {
         console.warn('[graph] engine destroy: label cleanup failed', err);
@@ -718,8 +1349,91 @@ export class PixiGraphEngine {
 
   // ── Internals: 布局 / 渲染 ──
 
-  /** Obsidian 视觉权重：半径 2 倍于 Quartz 式配方，fit 缩放(~0.3)下叶子≈4px、hub≈20px */
-  private radiusOf(n: { linkCount: number; dead?: boolean }): number {
+  /** 邻域表 + 度数排名重算（buildAndRender 与展开/收起增量变更共用）。 */
+  private recomputeAdjacencyAndRank(): void {
+    const adjacency = new Map<string, Set<string>>();
+    for (const n of this.nodes) adjacency.set(n.id, new Set());
+    for (const l of this.links) {
+      const s = l.source as SimNode;
+      const t = l.target as SimNode;
+      adjacency.get(s.id)!.add(t.id);
+      adjacency.get(t.id)!.add(s.id);
+    }
+    this.adjacency = adjacency;
+    const byDegree = [...this.nodes].sort(
+      (a, b) => (adjacency.get(b.id)?.size ?? 0) - (adjacency.get(a.id)?.size ?? 0),
+    );
+    byDegree.forEach((n, i) => {
+      n.rank = i;
+    });
+  }
+
+  /** 节点渲染对象工厂（rebuildRendering 与展开增量注入共用）：gfx + 指针事件 + 高分辨率标签。 */
+  private makeNodeRenderData(n: SimNode): NodeRenderData {
+    // trunk 簇团：簇色（id 哈希进调色板）+ theme 感知描边；死链节点用中性色区分
+    const isCluster = !!n.trunkCluster;
+    const color = isCluster
+      ? trunkClusterColor(n.id)
+      : n.dead
+        ? this.theme.deadNode
+        : nodeColorFor(n.nodeType, n.linkCount, this.theme);
+    const gfx = new Graphics({
+      interactive: true,
+      eventMode: 'static',
+      hitArea: new Circle(0, 0, n.radius + 6),
+      // 簇团 = 可展开（zoom-in 光标提示），成员/hub = 可打开（pointer）——H2 验收 A1：
+      // 区分度不够时容易误点成员跳走文档
+      cursor: isCluster ? 'zoom-in' : 'pointer',
+    })
+      .circle(0, 0, n.radius)
+      .fill({ color });
+    if (isCluster) gfx.stroke({ width: 2.5, color: this.theme.edge });
+    gfx.on('pointerover', () => this.onNodePointerOver(n.id));
+    gfx.on('pointerleave', () => this.onNodePointerLeave(n.id));
+    this.nodesLayer.addChild(gfx);
+
+    const label = new Text({
+      interactive: false,
+      eventMode: 'none',
+      text: n.text,
+      alpha: 0,
+      anchor: { x: 0.5, y: 1 }, // 底边中点对齐 position；position 每帧设在节点上方（屏幕间距）
+      style: {
+        fontSize: LABEL_FONT_SIZE,
+        fill: this.theme.label,
+        fontFamily: LABEL_FONT,
+      },
+      // 高分辨率栅格化：缩放时文字不糊（Quartz 同款，关键）
+      resolution: window.devicePixelRatio * 4,
+    });
+    this.labelsLayer.addChild(label);
+
+    return {
+      simulationData: n,
+      gfx,
+      label,
+      labelW: label.width,
+      labelH: label.height,
+      alpha: 1,
+      active: false,
+    };
+  }
+
+  /** 边渲染数据工厂：trunk 聚合边/spoke 宽 ∝ log2(weight)，全量边恒 1×edgeWidth。 */
+  private makeLinkRenderData(l: SimLink): LinkRenderData {
+    return {
+      simulationData: l,
+      color: this.theme.edge,
+      alpha: 1,
+      active: false,
+      widthMult: l.trunkWeight !== undefined ? trunkEdgeWidth(l.trunkWeight) : 1,
+    };
+  }
+
+  /** Obsidian 视觉权重：半径 2 倍于 Quartz 式配方，fit 缩放(~0.3)下叶子≈4px、hub≈20px；
+   *  trunk 簇团走 blob 公式（4+√size，设计 §4.2 半径 ∝ √成员数） */
+  private radiusOf(n: { linkCount: number; dead?: boolean; trunkCluster?: { size: number } }): number {
+    if (n.trunkCluster) return trunkBlobRadius(n.trunkCluster.size) * this.nodeScale;
     if (n.dead) return 3 * this.nodeScale;
     return (2 + Math.sqrt(n.linkCount)) * 2 * this.nodeScale;
   }
@@ -728,6 +1442,7 @@ export class PixiGraphEngine {
   private rebuildRendering(): void {
     this.sim?.stop();
     this.lastLabelK = 0; // 新标签 scale=1，需重新同步 1/k
+    this.geometryDirty = true; // 重建即全量重画：显示对象全换新，消费过的脏标记不可信
     this.nodeRenderData = [];
     this.linkRenderData = [];
     this.tweens.forEach((t) => t.stop());
@@ -736,20 +1451,21 @@ export class PixiGraphEngine {
     this.nodesLayer.removeChildren().forEach((c) => c.destroy());
     this.labelsLayer.removeChildren().forEach((c) => c.destroy());
     this.linkLayer.removeChildren().forEach((c) => c.destroy());
+    this.chipsLayer.removeChildren().forEach((c) => c.destroy());
     this.selectionGfx = new Graphics();
     this.nodesLayer.addChild(this.selectionGfx);
 
+    // trunk 用固定配方（TRUNK_FORCE），全量沿用用户 this.forces——两套语义互不污染
+    const f = this.trunkMode ? TRUNK_FORCE : this.forces;
     const sim = forceSimulation<SimNode>(this.nodes)
-      .force('charge', forceManyBody<SimNode>().strength(this.forces.repelStrength).distanceMin(DISTANCE_MIN))
-      .force('center', forceCenter<SimNode>(0, 0).strength(this.forces.centerStrength))
+      .force('charge', forceManyBody<SimNode>().strength(f.repelStrength).distanceMin(DISTANCE_MIN))
+      .force('center', forceCenter<SimNode>(0, 0).strength(f.centerStrength))
       .force(
         'link',
         forceLink<SimNode, SimLink>(this.links)
           .id((d) => d.id)
-          .distance(this.forces.linkDistance)
-          .strength(
-            this.forces.linkStrength > 0 ? this.forces.linkStrength : defaultLinkStrength(this.adjacency),
-          ),
+          .distance(f.linkDistance)
+          .strength(f.linkStrength > 0 ? f.linkStrength : defaultLinkStrength(this.adjacency)),
       )
       .force('x', forceX<SimNode>(0).strength(CONTAIN_STRENGTH))
       .force('y', forceY<SimNode>(0).strength(CONTAIN_STRENGTH))
@@ -769,56 +1485,24 @@ export class PixiGraphEngine {
       if (!this.hasUserInteracted) this.fitView({ animate: true });
     });
     this.sim = sim;
-
-    const dpr = window.devicePixelRatio;
+    // P0-1：任何 sim tick 都意味着几何在动（内部计时器与 preSettle 手动 tick 都会触发）
+    sim.on('tick', () => {
+      this.geometryDirty = true;
+    });
 
     for (const n of this.nodes) {
-      // 死链节点用虚线感的中性色区分（theme.deadNode）
-      const color = n.dead ? this.theme.deadNode : nodeColorFor(n.nodeType, n.linkCount, this.theme);
-      const gfx = new Graphics({
-        interactive: true,
-        eventMode: 'static',
-        hitArea: new Circle(0, 0, n.radius + 3),
-        cursor: 'pointer',
-      })
-        .circle(0, 0, n.radius)
-        .fill({ color });
-      gfx.on('pointerover', () => this.onNodePointerOver(n.id));
-      gfx.on('pointerleave', () => this.onNodePointerLeave(n.id));
-      this.nodesLayer.addChild(gfx);
-
-      const label = new Text({
-        interactive: false,
-        eventMode: 'none',
-        text: n.text,
-        alpha: 0,
-        anchor: { x: 0.5, y: 1 }, // 底边中点对齐 position；position 每帧设在节点上方（屏幕间距）
-        style: {
-          fontSize: LABEL_FONT_SIZE,
-          fill: this.theme.label,
-          fontFamily: LABEL_FONT,
-        },
-        // 高分辨率栅格化：缩放时文字不糊（Quartz 同款，关键）
-        resolution: dpr * 4,
-      });
-      this.labelsLayer.addChild(label);
-
-      this.nodeRenderData.push({
-        simulationData: n,
-        gfx,
-        label,
-        labelW: label.width,
-        labelH: label.height,
-        alpha: 1,
-        active: false,
-      });
+      this.nodeRenderData.push(this.makeNodeRenderData(n));
     }
 
+    // P0-2：边几何状态留在 linkRenderData，绘制统一收进单个 edgesGfx（redrawEdges）。
+    // 旧版每边一个 Graphics：23k 边 = 23k 显示对象每帧各自 clear+重画，实测占帧预算 ~86%。
+    // trunk 聚合边宽 ∝ log2(weight)（trunkEdgeWidth），全量边恒 1×edgeWidth。
     for (const l of this.links) {
-      const gfx = new Graphics({ interactive: false, eventMode: 'none' });
-      this.linkLayer.addChild(gfx);
-      this.linkRenderData.push({ simulationData: l, gfx, color: this.theme.edge, alpha: 1, active: false });
+      this.linkRenderData.push(this.makeLinkRenderData(l));
     }
+    this.edgesGfx = new Graphics({ interactive: false, eventMode: 'none' });
+    this.linkLayer.addChild(this.edgesGfx);
+    this.redrawEdges();
 
     this.updateFocusAndRender();
   }
@@ -828,11 +1512,37 @@ export class PixiGraphEngine {
       const d = n.simulationData;
       n.gfx.clear();
       n.gfx.circle(0, 0, d.radius).fill({
-        color: d.dead ? this.theme.deadNode : nodeColorFor(d.nodeType, d.linkCount, this.theme),
+        color: d.trunkCluster
+          ? trunkClusterColor(d.id)
+          : d.dead
+            ? this.theme.deadNode
+            : nodeColorFor(d.nodeType, d.linkCount, this.theme),
       });
+      if (d.trunkCluster) n.gfx.stroke({ width: 2.5, color: this.theme.edge });
     }
     for (const l of this.linkRenderData) {
       l.color = this.theme.edge;
+    }
+  }
+
+  /** 全部边重画进单个 Graphics。两遍扫描替代 per-link zIndex：active 边最后画 = 置顶。 */
+  private redrawEdges(): void {
+    this.edgesGfx.clear();
+    const cx = this.width / 2;
+    const cy = this.height / 2;
+    // 两遍循环（inactive 先、active 后），零 per-edge 分配：不许 [...linkRenderData].sort()（收敛期每帧调用）
+    for (const pass of [false, true] as const) {
+      for (const l of this.linkRenderData) {
+        if (l.active !== pass) continue;
+        const d = l.simulationData;
+        const s = d.source as SimNode;
+        const t = d.target as SimNode;
+        if (s.x == null || s.y == null || t.x == null || t.y == null) continue;
+        this.edgesGfx
+          .moveTo(s.x + cx, s.y + cy)
+          .lineTo(t.x + cx, t.y + cy)
+          .stroke({ alpha: l.alpha, width: l.widthMult * this.edgeWidth, color: l.color });
+      }
     }
   }
 
@@ -897,6 +1607,7 @@ export class PixiGraphEngine {
 
   private renderNodesTween(): void {
     this.tweens.get('hover')?.stop();
+    this.tweenUntil = performance.now() + 250; // 200ms tween + 余量：期间帧必须照常上屏
     const group = new Group();
     const focusId = this.focusId;
     const isSelected = focusId !== null && focusId === this.selectedId;
@@ -929,14 +1640,21 @@ export class PixiGraphEngine {
 
   private renderLinksTween(): void {
     this.tweens.get('link')?.stop();
+    this.tweenUntil = performance.now() + 250; // 200ms tween + 余量：期间帧必须照常上屏
     const group = new Group();
     const focusId = this.focusId;
+    this.edgesDirty = true; // color 即时切换，下一帧边必须重画
     for (const l of this.linkRenderData) {
       const alpha = focusId === null ? 1 : l.active ? 1 : 0.2;
       l.color = l.active ? this.theme.edgeHover : this.theme.edge;
-      // 高亮边置顶（zIndex 1），不被淡化边遮挡；无焦点时归位 0
-      l.gfx.zIndex = l.active ? 1 : 0;
-      group.add(new Tween<LinkRenderData>(l).to({ alpha }, 200));
+      // 高亮边置顶改由 redrawEdges 的绘制顺序保证（active 最后画）；alpha 仍 200ms tween
+      group.add(
+        new Tween<LinkRenderData>(l)
+          .to({ alpha }, 200)
+          .onUpdate(() => {
+            this.edgesDirty = true; // alpha 逐帧变：tween 存活期内每帧重画边
+          }),
+      );
     }
     group.getAll().forEach((tw) => tw.start());
     this.tweens.set('link', makeTweenNode(group));
@@ -949,9 +1667,10 @@ export class PixiGraphEngine {
    * 放大时盒变小 → 更多标签放得下 → 渐进显示；缩小时反之。这正是 Obsidian
    * 「远看只有 hub 有文字、放大后文字逐个浮现」的行为。
    *
-   * 1. 候选：焦点邻域（总是显示）∪（屏幕半径达标 且 度数排名在候选池内）
-   * 2. 贪心碰撞检测：焦点标签先放置且总是显示；普通标签按度数排名放置，
-   *    与已放置标签重叠则隐藏——「文字永不叠在一起」。
+   * H2 统一 LOD 规则（labelLod.ts，设计 §4.3）：候选 = 屏内 ∩ 屏幕直径 ≥ 8px
+   * （hovered 无条件、trunk blob 豁免），同屏上限 60、cap 内 1-hop 关联享优先——
+   * 替代旧的「焦点邻域全显 + 度数预算池」双轨（hover 时邻居无条件显名正是大库
+   * 「文字干扰」的根）。贪心碰撞检测照旧：焦点/blob 钉住必放，普通标签避让。
    */
   private syncLabels(): void {
     const focusId = this.focusId;
@@ -967,34 +1686,42 @@ export class PixiGraphEngine {
       for (const rd of this.nodeRenderData) rd.label.scale.set(s, s);
     }
 
-    interface Candidate {
-      rd: NodeRenderData;
-      focused: boolean;
-    }
-    const focusedCands: Candidate[] = [];
-    const normalCands: Candidate[] = [];
-
+    const t = this.currentTransform;
+    const view = {
+      x: (0 - t.x) / t.k - this.width / 2,
+      y: (0 - t.y) / t.k - this.height / 2,
+      w: this.width / t.k,
+      h: this.height / t.k,
+    };
+    const lodNodes: LabelLodNode[] = [];
+    const rdByKey = new Map<string, NodeRenderData>();
     for (const rd of this.nodeRenderData) {
       const d = rd.simulationData;
-      if (d.x == null || d.y == null) {
-        rd.label.visible = false;
-        continue;
-      }
-      if (focusId !== null && this.focusedNeighbours.has(d.id)) {
-        focusedCands.push({ rd, focused: true });
-        continue;
-      }
-      rd.label.visible = false; // 先隐藏非焦点标签，碰撞检测后再点亮
-      if (d.radius * k >= LABEL_MIN_SCREEN_RADIUS && d.rank < LABEL_BUDGET) {
-        normalCands.push({ rd, focused: false });
-      }
+      rd.label.visible = false; // 先灭后亮：候选经贪心碰撞检测再点亮
+      if (d.x == null || d.y == null) continue;
+      lodNodes.push({
+        key: d.id,
+        x: d.x,
+        y: d.y,
+        radius: d.radius,
+        degree: this.adjacency.get(d.id)?.size ?? 0,
+        forceShow: !!d.trunkCluster, // trunk 簇名常显（T2 承诺，直径豁免）
+      });
+      rdByKey.set(d.id, rd);
     }
-    // 度数高的标签优先显示
-    normalCands.sort((a, b) => a.rd.simulationData.rank - b.rd.simulationData.rank);
+    const orderedKeys = selectLabels({
+      nodes: lodNodes,
+      view,
+      k,
+      hoveredKey: this.hoveredNodeId,
+      neighbourKeys: focusId ? this.focusedNeighbours : NO_NEIGHBOURS,
+      minScreenDiameter: LABEL_MIN_SCREEN_DIAMETER,
+      maxOnScreen: LABEL_MAX_ONSCREEN,
+    });
 
-    const ordered = focusedCands.concat(normalCands);
     // 包围盒（stage-local）= 屏幕尺寸 / k；标签底边位于节点上方 LABEL_GAP_SCREEN 屏幕像素
-    const boxes = ordered.map(({ rd }) => {
+    const boxes = orderedKeys.map((key) => {
+      const rd = rdByKey.get(key)!;
       const d = rd.simulationData;
       const lx = d.x! + cx;
       const top = d.y! + cy - d.radius - LABEL_GAP_SCREEN / k;
@@ -1008,13 +1735,15 @@ export class PixiGraphEngine {
         y1: top + pad,
       };
     });
-    const visible = greedyLabelLayout(
-      boxes,
-      ordered.map((c) => c.focused),
+    // 钉住必放：1-hop 焦点标签（hover/选中语境下的关键信息）+ trunk blob（簇名）
+    const pinned = orderedKeys.map(
+      (key) => this.focusedNeighbours.has(key) || !!rdByKey.get(key)!.simulationData.trunkCluster,
     );
+    const visible = greedyLabelLayout(boxes, pinned);
 
-    for (let i = 0; i < ordered.length; i++) {
-      const { rd, focused } = ordered[i]!;
+    for (let i = 0; i < orderedKeys.length; i++) {
+      const rd = rdByKey.get(orderedKeys[i]!)!;
+      const focused = this.focusedNeighbours.has(orderedKeys[i]!);
       rd.label.visible = visible[i]!;
       rd.label.alpha = focusId !== null && !focused ? dim : 1;
     }
@@ -1042,6 +1771,7 @@ export class PixiGraphEngine {
   }
 
   private applyTransform(t: ZoomTransform): void {
+    this.transformDirty = true; // zoom/pan/fit/视口动画共用入口：标签+minimap+选中环要跟
     this.currentTransform = t;
     this.stage.scale.set(t.k, t.k);
     this.stage.position.set(t.x, t.y);
@@ -1110,6 +1840,7 @@ export class PixiGraphEngine {
     node.y = y;
     node.fx = x;
     node.fy = y;
+    this.geometryDirty = true; // 单击钉住/未过阈值拖拽：不加热 sim 也在动几何
   }
 
   /** 解除所有节点的 fx/fy（单击路径复位，让图恢复自由布局）。 */
@@ -1173,6 +1904,7 @@ export class PixiGraphEngine {
   private tileIsolated(): void {
     const tiled = tileIsolatedNodes(this.degreeNodes());
     if (tiled.size === 0) return;
+    this.geometryDirty = true;
     for (const [id, p] of tiled) {
       const n = this.nodeById.get(id);
       if (!n) continue;
@@ -1189,6 +1921,8 @@ export class PixiGraphEngine {
     if (active) {
       // 隐藏标签：拖拽期不重测/重传标签纹理
       for (const rd of this.nodeRenderData) rd.label.visible = false;
+    } else {
+      this.geometryDirty = true; // 松手恢复：标签 + minimap 同步要回来
     }
   }
 
@@ -1276,7 +2010,10 @@ export class PixiGraphEngine {
             this.dragNodeKey = null;
             this.unpinAllNodes(); // mousedown 钉过全部，单击也要解除，否则图被钉住
             if (Date.now() - this.dragStartTime < 500 && moved <= CLICK_MOVE_TOLERANCE) {
-              this.callbacks.onNodeClick?.(subj.id, toEngineNode(subj));
+              // trunk 簇团单击：延迟派发给双击留取消窗（双击簇团 no-op，T2 deferred minor）；
+              // hub/成员立即打开文件（铁律零延迟）
+              if (subj.trunkCluster) this.scheduleTrunkClusterClick(subj.id);
+              else this.callbacks.onNodeClick?.(subj.id, toEngineNode(subj));
             }
           }
         }),
@@ -1298,6 +2035,7 @@ export class PixiGraphEngine {
     if (this.selectedId === null) return;
     if (this.hitTest(e)) return; // 点中节点：跳转由 drag end 的单击判定负责
     this.selectedId = null;
+    this.selectionDirty = true;
     this.updateFocusAndRender();
   };
 
@@ -1305,12 +2043,46 @@ export class PixiGraphEngine {
     const node = this.hitTest(e);
     this.hasUserInteracted = true;
     if (node) {
+      if (node.trunkCluster) {
+        // 双击簇团 = no-op：取消第一次单击排定的展开回调（第二次 end 也会重排，此处统一清）
+        if (this.trunkClickDefer) {
+          clearTimeout(this.trunkClickDefer);
+          this.trunkClickDefer = null;
+        }
+        return;
+      }
       // 死链节点也触发双击（由 GraphPage 决定：新建空白页并打开）
       this.callbacks.onNodeDoubleClick?.(node.id, toEngineNode(node));
+    } else if (this.hitTrunkChip(e)) {
+      // 双击落在收起 chip 上：不触发空白 fit（chip 是收起出口，误触相机跳转很伤）
+      return;
     } else {
       this.fitView({ animate: true });
     }
   };
+
+  /** 双击命中检测（chip 版）：事件点到某 chip 屏幕位置 ≤ 20 CSS px。 */
+  private hitTrunkChip(e: MouseEvent): boolean {
+    const rect = this.canvas.getBoundingClientRect();
+    const ex = e.clientX - rect.left;
+    const ey = e.clientY - rect.top;
+    const t = this.currentTransform;
+    for (const chip of this.trunkChips.values()) {
+      const sx = chip.root.x * t.k + t.x;
+      const sy = chip.root.y * t.k + t.y;
+      if (Math.hypot(ex - sx, ey - sy) <= 20) return true;
+    }
+    return false;
+  }
+
+  /** 簇团单击延迟派发（TRUNK_CLUSTER_CLICK_DEFER_MS）：双击第二击的 dblclick 事件会取消。 */
+  private scheduleTrunkClusterClick(clusterId: string): void {
+    if (this.trunkClickDefer) clearTimeout(this.trunkClickDefer);
+    this.trunkClickDefer = setTimeout(() => {
+      this.trunkClickDefer = null;
+      this.callbacks.onTrunkClusterClick?.(clusterId);
+    }, TRUNK_CLUSTER_CLICK_DEFER_MS);
+  }
 
   /** 双击命中检测：canvas 坐标 → simulation 坐标 */
   private hitTest(e: MouseEvent): SimNode | null {
@@ -1332,39 +2104,51 @@ export class PixiGraphEngine {
 
   private readonly renderFrame = (time: number): void => {
     if (this.destroyed) return;
-    this.advanceViewport();
-    for (const t of this.tweens.values()) t.update(time);
+    this.advanceViewport(); // 视口动画步进（内部走 applyTransform → transformDirty）
+    const tweensActive = time < this.tweenUntil;
+    for (const t of this.tweens.values()) t.update(time); // onUpdate 置 edgesDirty
 
-    const cx = this.width / 2;
-    const cy = this.height / 2;
-    for (const n of this.nodeRenderData) {
-      const d = n.simulationData;
-      if (d.x == null || d.y == null) continue;
-      const x = d.x + cx;
-      const y = d.y + cy;
-      n.gfx.position.set(x, y);
-      n.label.position.set(x, y - d.radius - LABEL_GAP_SCREEN / this.currentTransform.k);
-    }
-    for (const l of this.linkRenderData) {
-      const d = l.simulationData;
-      const s = d.source as SimNode;
-      const t = d.target as SimNode;
-      if (s.x == null || s.y == null || t.x == null || t.y == null) continue;
-      l.gfx.clear();
-      l.gfx
-        .moveTo(s.x + cx, s.y + cy)
-        .lineTo(t.x + cx, t.y + cy)
-        .stroke({ alpha: l.alpha, width: this.edgeWidth, color: l.color });
+    // P0-1：先读后清——本帧消费一次，未标记的工作全部跳过（空闲帧零绘制）
+    const geometryDirty = this.geometryDirty;
+    this.geometryDirty = false;
+    const transformDirty = this.transformDirty;
+    this.transformDirty = false;
+    const selectionDirty = this.selectionDirty;
+    this.selectionDirty = false;
+
+    if (geometryDirty) {
+      const cx = this.width / 2;
+      const cy = this.height / 2;
+      for (const n of this.nodeRenderData) {
+        const d = n.simulationData;
+        if (d.x == null || d.y == null) continue;
+        const x = d.x + cx;
+        const y = d.y + cy;
+        n.gfx.position.set(x, y);
+        n.label.position.set(x, y - d.radius - LABEL_GAP_SCREEN / this.currentTransform.k);
+      }
+      // chip 跟随团心（resize 后 cx/cy 变化也能钉在簇上——deferred minor 归位）
+      for (const chip of this.trunkChips.values()) {
+        chip.root.position.set(chip.centroid.x + cx, chip.centroid.y + cy);
+      }
+      this.redrawEdges();
+      this.edgesDirty = false;
+    } else if (this.edgesDirty) {
+      this.redrawEdges();
+      this.edgesDirty = false;
     }
 
     // 拖拽降质：位移场期跳过标签重排（标签已隐藏）与 minimap 重绘监听
-    if (!this.motionMode) {
+    if (!this.motionMode && (geometryDirty || transformDirty)) {
       this.syncLabels();
       for (const listener of this.renderListeners) listener();
     }
-    this.syncSelectionRing();
+    if (geometryDirty || transformDirty || selectionDirty) this.syncSelectionRing();
 
-    this.app.renderer.render(this.stage);
+    // 无脏且 tween 已停 → 整帧跳过 renderer.render（空闲期 CPU 断崖的本体）
+    if (geometryDirty || transformDirty || tweensActive || selectionDirty) {
+      this.app.renderer.render(this.stage);
+    }
     this.rafId = requestAnimationFrame(this.renderFrame);
   };
 }
@@ -1395,9 +2179,9 @@ function defaultLinkStrength(adjacency: ReadonlyMap<string, ReadonlySet<string>>
 }
 
 function collideRadius(d: SimNode): number {
-  // 上限：deg-683 巨型 hub 的 collide（radius*5+4 = 285）会让任何扰动在星形图里被放大成连锁爆炸；
-  // 封顶到 COLLIDE_MAX，使单个超级节点不至于用「违反直觉的 285 半径球」碾压整张图。
-  return Math.min(d.radius * COLLIDE_RADIUS_MULT + COLLIDE_PAD, COLLIDE_MAX);
+  // 公式（×5+4 封顶 100）在 graphUtils.collideRadiusValue——mini-sim/布局 worker 共用同一来源。
+  // 封顶动机：deg-683 巨型 hub 的 collide（radius*5+4 = 285）会让任何扰动在星形图里被放大成连锁爆炸。
+  return collideRadiusValue(d.radius);
 }
 
 function toEngineNode(n: SimNode): EngineNode {
@@ -1408,5 +2192,6 @@ function toEngineNode(n: SimNode): EngineNode {
     linkCount: n.linkCount,
     nodeType: n.nodeType ?? null,
     dead: n.dead,
+    trunkCluster: n.trunkCluster,
   };
 }

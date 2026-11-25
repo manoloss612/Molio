@@ -1,5 +1,5 @@
 import type { ManagedTransportState } from '../api/managed-events';
-import { useRef, useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
+import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { ChatComposer, buildAttachmentPrefix } from './ChatComposer';
 import type { PastedImage, FileRef } from './ChatComposer';
 import { UserMessage } from './UserMessage';
@@ -7,6 +7,9 @@ import { AssistantMessage } from './AssistantMessage';
 import { SessionWriteKindsProvider } from './SessionWriteKinds';
 import { findLastAssistant } from '../utils/workSteps';
 import { isNearBottom } from './chatScrollPin';
+import { rememberChatScroll, recallChatScroll, findVisibleAnchor, applyAnchorOffset } from '../stores/chatScrollMemory';
+import { MessageRail } from './MessageRail';
+import { buildRailPairs } from '../utils/messageRail';
 import { useSelectMode, messageSelectionStore } from '../stores/messageSelectionStore';
 import { quizSubjectStore } from '../stores/quizSubjectStore';
 import { pairQuizGradings, pairSubjectAnswers } from '../utils/quizAnswer';
@@ -24,6 +27,8 @@ export interface ChatSessionViewProps {
   transportState?: ManagedTransportState;
   onRetryTransport?: () => void;
   conversationId?: string | null;
+  /** 会话所属库（daemon 的 conversations.vault_id）——题卡取库的真相源。 */
+  conversationVaultId?: string | null;
 
   onSend: (text: string, images?: PastedImage[]) => void;
   onSubmitForm?: (text: string) => void;
@@ -77,6 +82,36 @@ export interface ChatSessionViewProps {
    * message keeps its toolbar visible and labels the save action.
    */
   saveHint?: boolean;
+  /**
+   * 本视图当前是否可见（面板：`panelOpen && 活动标签`；`/chat` 恒 true，默认值）。
+   * false→true 时从滚动记忆（chatScrollMemory）恢复阅读位置 —— 覆盖面板切标签、
+   * 退出全屏把全屏里读到的位置带回面板。语义拍板（2026-11-09）：记忆存在 ⇄ 标签
+   * 还开着 ⇄ 切回恢复；关标签删记忆 ⇄ 重开贴底。
+   */
+  active?: boolean;
+  /**
+   * 消息导航 rail（KB 问答会话启用）：日志区外包 wrapper、右缘挂提问刻度条。
+   * 包装只看本 prop 不看阈值——DOM 结构从挂载起稳定，显隐阈值由 MessageRail 自理。
+   */
+  messageRail?: boolean;
+}
+
+/**
+ * 量出消息区里每条消息的几何信息（top 相对滚动内容原点、height）。
+ * 浮标按钮（chat-jump-bottom）不是消息，剔除——保存与恢复两侧用同一过滤，
+ * 锚点序号才有意义。
+ */
+export function measureMessages(el: HTMLElement): { tops: number[]; heights: number[] } {
+  const logTop = el.getBoundingClientRect().top;
+  const tops: number[] = [];
+  const heights: number[] = [];
+  for (const child of Array.from(el.children)) {
+    if (child.classList.contains('chat-jump-bottom')) continue;
+    const r = child.getBoundingClientRect();
+    tops.push(r.top - logTop + el.scrollTop);
+    heights.push(r.height);
+  }
+  return { tops, heights };
 }
 
 /**
@@ -89,6 +124,7 @@ export function ChatSessionView({
   activity,
   transportState, onRetryTransport,
   conversationId,
+  conversationVaultId,
   onSend,
   onSubmitForm,
   onCancel,
@@ -111,10 +147,15 @@ export function ChatSessionView({
   onDeleteConversations,
   pruneSelection = true,
   saveHint,
+  active = true,
+  messageRail = false,
 }: ChatSessionViewProps) {
   const { t } = useI18n();
   const logRef = useRef<HTMLDivElement>(null);
   const selectMode = useSelectMode();
+  // 滚动回调要拿「此刻的会话」写记忆：渲染期同步进 ref，回调闭包保持稳定。
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
 
   // ── 贴底跟随（stick-to-bottom）─────────────────────────────────────────
   // 规则：用户贴底时，内容长高（流式文本 / 工具卡 / 思考块）就瞬时跟到底；
@@ -138,8 +179,27 @@ export function ChatSessionView({
     if (!el) return;
     // 程序化置底也会走这里：置底后判定为 near bottom，pinned 保持 true（不会自锁）。
     const near = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
-    pinnedRef.current = near;
-    setShowJumpBottom(!near);
+    // rail 平滑跳转途经底部邻域时不许把贴底翻回来：动画前几帧仍「近底」，
+    // 若在此翻回 true，任何迟到的 DOM 变更（代码高亮等）都会把飞行中的动画
+    // 拽回底部（实测 flake：点击后 2s 停在原地）。
+    if (!railJumpingRef.current) {
+      pinnedRef.current = near;
+      setShowJumpBottom(!near);
+    }
+    // 位置持续写入会话记忆（同 useScrollMemory 约束 1：不依赖「切走时保存」，
+    // 那一刻 DOM 可能已经换人）。隐藏容器（display:none）读到的 scrollTop 恒 0，
+    // 写入会把记忆污染成顶部 —— 必须跳过。
+    if (el.clientHeight > 0) {
+      // 贴底态不需要锚点（恢复时贴新底）；上翻阅读态记「视口顶是哪条消息 +
+      // 相对偏移」——绝对坐标在宽度不同的表面（全屏 ⇄ 面板）之间会因重新折行
+      // 漂移，锚点恢复把同一条消息钉回同一视口位置，宽度无关。
+      let anchor: ReturnType<typeof findVisibleAnchor> = null;
+      if (!near) {
+        const { tops, heights } = measureMessages(el);
+        anchor = findVisibleAnchor(tops, heights, el.scrollTop);
+      }
+      rememberChatScroll(conversationIdRef.current, { top: el.scrollTop, pinned: near, anchor });
+    }
   }, []);
 
   // 内容长高 → 贴底时跟滚。characterData 覆盖流式文本追加，
@@ -162,13 +222,82 @@ export function ChatSessionView({
     if (pinnedRef.current) stickToBottom();
   }, [messages.length, stickToBottom]);
 
-  // 换会话 = 换上下文：跟随状态复位。否则在 A 会话上翻（脱离跟随）后打开
-  // B 会话，B 的历史会停在中段而不是最新处。
+  // ── 位置落位：挂载 / 换会话 / 变为可见 ─────────────────────────────────
+  // 语义（chatScrollMemory，2026-11-09 拍板）：
+  // - 有记忆且上翻过（!pinned）→ 恢复切换前的坐标，保持脱离跟随，浮标供回底；
+  // - 有记忆且贴底（pinned）→ 贴底跟随（后台可能已长高，贴**新**底）；
+  // - 无记忆（新会话 / 关闭后重开）→ 原语义贴底。这条同时保住了「换会话 = 换
+  //   上下文」的旧行为：在 A 上翻后打开从未开过的 B，B 停在最新处。
+  // 落位重落循环的 rAF 句柄：换会话/卸载时取消上一轮，防止旧会话的循环写新会话的滚动。
+  const settleRafRef = useRef<number[]>([]);
   useEffect(() => {
-    pinnedRef.current = true;
-    setShowJumpBottom(false);
-    stickToBottom();
-  }, [conversationId, stickToBottom]);
+    const ids = settleRafRef;
+    return () => {
+      ids.current.forEach((id) => cancelAnimationFrame(id)); ids.current = [];
+      window.clearTimeout(railJumpTimerRef.current);
+    };
+  }, []);
+
+  const settlePosition = useCallback(() => {
+    const saved = conversationId ? recallChatScroll(conversationId) : null;
+    if (saved && !saved.pinned) {
+      pinnedRef.current = false;
+      setShowJumpBottom(true);
+    } else {
+      pinnedRef.current = true;
+      setShowJumpBottom(false);
+    }
+    const el = logRef.current;
+    if (!el) return;
+
+    // 落位要**扛过表面的几何过渡**：dock 形态宽高有 ~300ms 可插值过渡，刚变为
+    // 可见时量到的消息位置不是终态，落一次会在最终布局下漂移（实测差出一条
+    // 消息）。因此按帧重落：锚点非贴底重钉同一条消息、贴底重贴新底，直到
+    // scrollHeight 连续两帧稳定（几何终态）或超时。用户中途真滚动了（位置偏离
+    // 我们写的值）就停手让位——程序化写入触发的 scroll 事件值与 stamp 一致，
+    // 不会误判。
+    settleRafRef.current.forEach((id) => cancelAnimationFrame(id));
+    settleRafRef.current = [];
+    let stamp = el.scrollTop;
+    let lastHeight = el.scrollHeight;
+    let stableFrames = 0;
+    const deadline = performance.now() + 450;
+    const tick = () => {
+      if (!logRef.current) return;
+      if (Math.abs(el.scrollTop - stamp) > 1) return; // 用户滚动了 → 让位
+      if (el.scrollHeight === lastHeight) stableFrames += 1;
+      else stableFrames = 0;
+      lastHeight = el.scrollHeight;
+      if (saved && !saved.pinned && saved.anchor) {
+        const { tops } = measureMessages(el);
+        const target = tops[saved.anchor.index];
+        // 锚点序号失效（消息被编辑重发截断）→ 退回绝对坐标，浏览器自动 clamp。
+        const next = target !== undefined ? applyAnchorOffset(target, saved.anchor) : saved.top;
+        if (Math.abs(el.scrollTop - next) > 0.5) {
+          el.scrollTop = next;
+        }
+        stamp = el.scrollTop;
+      } else {
+        el.scrollTop = el.scrollHeight;
+        stamp = el.scrollTop;
+      }
+      if (stableFrames >= 2 || performance.now() > deadline) return;
+      const id = requestAnimationFrame(tick);
+      settleRafRef.current.push(id);
+    };
+    tick();
+  }, [conversationId]);
+
+  // useLayoutEffect：换会话（全屏切标签）落在 paint 前，不闪一帧底部。
+  useLayoutEffect(() => {
+    settlePosition();
+  }, [conversationId, settlePosition]);
+
+  // 变为可见：面板标签 display:none ↔ 显示、面板开合（panelOpen 计入 active）、
+  // 退出全屏面板 view 复活 —— 全屏里读到的位置由此带回面板。
+  useEffect(() => {
+    if (active) settlePosition();
+  }, [active, settlePosition]);
 
   // Prune stale selected ids whenever the message set changes (streaming,
   // regenerate, etc. may have removed a selected bubble).
@@ -201,6 +330,46 @@ export function ChatSessionView({
   // Find the last assistant message ID so only that card stays interactive
   const lastAssistant = useMemo(() => findLastAssistant(messages), [messages]);
   const lastAssistantId = lastAssistant?.id ?? null;
+
+  // ── 消息导航 rail ────────────────────────────────────────────────────────
+  // 刻度 = 问答对（user 开对）。重算 O(n) 且只清洗 user 文本；assistant 流式
+  // 更新引起的重算可忽略——真正拦掉无谓重渲的是 MessageRail 的 memo 逐元素比较。
+  const railPairs = useMemo(() => buildRailPairs(messages), [messages]);
+  // rail 平滑跳转进行中（scrollend / 700ms 兜底解除）——期间 handleLogScroll
+  // 不得重算贴底态，见其注释。
+  const railJumpingRef = useRef(false);
+  const railJumpTimerRef = useRef(0);
+  // 点刻度跳转：先脱离贴底（否则流式输出立刻把视口拽回底部），再平滑滚动。
+  // ① 写入推迟两帧：setShowJumpBottom 让回底浮标进流（sticky 占流，~32px），末轮
+  //   刻度的目标常被 clamp——用浮标进流**前**的天花板会永远差一个浮标高（CI 实测
+  //   32px）。双 rAF 保证 clamp 看到的是含浮标的最终布局。
+  // ② smooth 只用于这一次用户动作；流式贴底跟随仍是瞬时写 scrollTop（那条
+  //   「动画被反复打断」的老规则不受影响）。prefers-reduced-motion 退回瞬时。
+  const onJumpScroll = useCallback((target: number, smooth = true) => {
+    const el = logRef.current;
+    if (!el) return;
+    pinnedRef.current = false;
+    setShowJumpBottom(true);
+    // 拖动刷选传 smooth=false（即时跟手，逐帧直写）；单次点击走平滑动画。
+    const behavior: ScrollBehavior = smooth && !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 'smooth'
+      : 'auto';
+    railJumpingRef.current = true;
+    window.clearTimeout(railJumpTimerRef.current);
+    railJumpTimerRef.current = window.setTimeout(() => {
+      railJumpingRef.current = false;
+    }, 700);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (logRef.current !== el) return;
+      el.scrollTo({ top: target, behavior });
+      const onEnd = () => {
+        railJumpingRef.current = false;
+        window.clearTimeout(railJumpTimerRef.current);
+      };
+      // 用户中途真滚动会取消动画并触发自己的 scrollend——两种结束都走这。
+      el.addEventListener('scrollend', onEnd, { once: true });
+    }));
+  }, []);
 
   // Wire onAnswerToolUse: route tool_result back to the open stream-json child
   const onAnswerToolUse = useCallback(
@@ -246,6 +415,7 @@ export function ChatSessionView({
       initialFileRefs={composerInitialFileRefs}
       onOpenConversation={onOpenConversation}
       onDeleteConversations={onDeleteConversations}
+      conversationId={conversationId}
     />
   );
 
@@ -262,12 +432,8 @@ export function ChatSessionView({
     ? `${composerBarClassName ?? 'home-composer-bar'} home-composer-bar--card`
     : composerBarClassName ?? 'home-composer-bar';
 
-  return (
-    // 写入的「新建 / 更新」判据要会话级上下文（写之前该路径出现过没有），
-    // 逐消息的产物横幅自己判不出来 —— 这里算一次，供其与产出面板共用。
-    <SessionWriteKindsProvider messages={messages}>
-    <>
-      {/* Chat log */}
+  // 日志区节点：messageRail 启用时外包 wrapper（rail 的定位宿主），否则原样。
+  const logNode = (
       <div
         className={logClassName ?? 'home-chat-log'}
         ref={logRef}
@@ -299,6 +465,9 @@ export function ChatSessionView({
                 key={msg.id}
                 message={msg}
                 conversationId={conversationId}
+                conversationVaultId={conversationVaultId}
+                conversationRunning={isRunning}
+                paperSubmitDisabled={!!composerArea || !!composerDisabled}
                 isLast={msg.id === lastAssistantId}
                 onAnswerToolUse={onSubmitToolResult ? onAnswerToolUse : undefined}
                 onSubmitForm={onSubmitForm ?? ((text: string) => handleSend(text, []))}
@@ -343,6 +512,23 @@ export function ChatSessionView({
           </button>
         )}
       </div>
+  );
+
+  return (
+    // 写入的「新建 / 更新」判据要会话级上下文（写之前该路径出现过没有），
+    // 逐消息的产物横幅自己判不出来 —— 这里算一次，供其与产出面板共用。
+    <SessionWriteKindsProvider messages={messages}>
+    <>
+      {/* Chat log（rail 启用时包在 wrapper 里，rail 钉其右缘） */}
+      {messageRail ? (
+        <div className="chat-log-wrap">
+          {logNode}
+          {/* 勾选删除态：右侧已有方框，rail 让位 */}
+          {!selectMode && (
+            <MessageRail logRef={logRef} pairs={railPairs} onJumpScroll={onJumpScroll} />
+          )}
+        </div>
+      ) : logNode}
 
       {/* 后台 subagent/workflow 活动树（activity SSE 事件驱动） */}
       <ActivityTree activity={activity ?? null} />

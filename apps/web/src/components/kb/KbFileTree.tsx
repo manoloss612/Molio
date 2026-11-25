@@ -7,7 +7,9 @@
 
 import { useCallback, useRef, useEffect } from 'react';
 import type { TreeNode, IngestStatus } from '@molio/contracts';
+import { isExternalPath } from './kb-constants';
 import { useI18n } from '../../i18n';
+import { FileIcon, FolderIcon, SearchIcon } from '../icons';
 
 /** Directories that reject drag-and-drop operations. */
 const PROTECTED_DIRS = ['wiki', 'docling_output'];
@@ -23,6 +25,14 @@ interface KbFileTreeProps {
   selectedFile: string | null;
   searchQuery: string;
   expandedPaths: Set<string>;
+  /**
+   * Whether the active vault has ≥1 registered external source root. Read-only
+   * mounts are `external/<label>/…`, but `external/` is only special when such a
+   * root exists — a vault without mounts must treat it as an ordinary folder.
+   * Owned by the page (it fetches the roots) and threaded down, so the tree does
+   * not re-fetch per node.
+   */
+  hasExternalRoots?: boolean;
   /**
    * Incremented by the parent to request the active file scroll itself into
    * view (used by the "locate" button). The effect in TreeNodeItem depends on
@@ -61,6 +71,7 @@ export function KbFileTree({
   selectedFile,
   searchQuery,
   expandedPaths,
+  hasExternalRoots = false,
   revealToken,
   revealPath,
   onRevealConsumed,
@@ -81,7 +92,7 @@ export function KbFileTree({
   if (nodes.length === 0) {
     return (
       <div className="kb-empty-state" style={{ padding: '32px 16px' }}>
-        <div className="kb-empty-icon">📂</div>
+        <div className="kb-empty-icon"><FolderIcon size={32} /></div>
         <h3>{t('kb.treeEmptyTitle')}</h3>
         {/* 明说拖拽这件事——原来只有一句英文，既没本地化也没告诉你文件怎么进来 */}
         <p data-testid="kb-tree-empty-hint">{t('kb.treeEmptyHint')}</p>
@@ -100,7 +111,7 @@ export function KbFileTree({
         data-testid="kb-tree-search-empty"
         style={{ padding: '32px 16px' }}
       >
-        <div className="kb-empty-icon">🔍</div>
+        <div className="kb-empty-icon"><SearchIcon size={32} /></div>
         <h3>{t('kb.searchEmptyTitle')}</h3>
         <p>{t('kb.searchEmptyHint')}</p>
         {onClearSearch && (
@@ -127,6 +138,7 @@ export function KbFileTree({
           selectedFile={selectedFile}
           searchQuery={searchQuery}
           expandedPaths={expandedPaths}
+          hasExternalRoots={hasExternalRoots}
           revealToken={revealToken}
           revealPath={revealPath}
           onRevealConsumed={onRevealConsumed}
@@ -153,6 +165,7 @@ interface TreeNodeItemProps {
   selectedFile: string | null;
   searchQuery: string;
   expandedPaths: Set<string>;
+  hasExternalRoots?: boolean;
   revealToken?: number;
   revealPath?: string | null;
   onRevealConsumed?: () => void;
@@ -173,6 +186,7 @@ function TreeNodeItem({
   selectedFile,
   searchQuery,
   expandedPaths,
+  hasExternalRoots = false,
   revealToken,
   revealPath,
   onRevealConsumed,
@@ -192,6 +206,17 @@ function TreeNodeItem({
   // Don't show "+" for items inside protected directories
   const nodeProtected = isInsideProtected(node.path);
   const showAddButton = onAddToWiki && !nodeProtected;
+
+  // Mounted external sources are read-only: no new file/folder, no rename, no
+  // delete, and no drag in or out. The daemon refuses any write resolving
+  // outside the vault (`assertWriteWithinVault`), so the tree must not offer
+  // one. Distinct from `nodeProtected`, which additionally mutes the ingest
+  // badge and the "加入 Wiki" action — reads of mounted sources stay allowed.
+  const nodeReadonly = isExternalPath(node.path, hasExternalRoots);
+  // Badge the read-only region once, at its top (`external` / `external/<label>`),
+  // instead of repeating a lock on every mounted file.
+  const showReadonlyBadge =
+    nodeReadonly && node.type === 'directory' && node.path.split('/').length <= 2;
 
   const handleAdd = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -231,9 +256,10 @@ function TreeNodeItem({
   if (node.type === 'directory') {
     // Determine drop acceptance for this directory.
     // Both external import and internal move targets need to be non-protected.
-    const acceptsDrop = !nodeProtected;
-    // Directory is draggable unless protected (e.g. wiki/, docling_output/).
-    const canDrag = !nodeProtected;
+    const acceptsDrop = !nodeProtected && !nodeReadonly;
+    // Directory is draggable unless protected (e.g. wiki/) or read-only
+    // (external/ — a drag out of a mount is a move outside the vault).
+    const canDrag = !nodeProtected && !nodeReadonly;
 
     const handleDirDragOver = useCallback((e: React.DragEvent) => {
       if (!acceptsDrop) {
@@ -337,7 +363,8 @@ function TreeNodeItem({
     return (
       <div
           className="kb-tree-group"
-          {...(!nodeProtected ? { 'data-drop-dir': node.path } : {})}
+          {...(!nodeProtected && !nodeReadonly ? { 'data-drop-dir': node.path } : {})}
+          {...(nodeReadonly ? { 'data-readonly': 'true' } : {})}
           onDragOver={handleDirDragOver}
           onDragLeave={handleDirDragLeave}
           onDrop={handleDirDrop}
@@ -359,6 +386,15 @@ function TreeNodeItem({
             />
           ) : (
             <span>{node.name}</span>
+          )}
+          {showReadonlyBadge && (
+            <span
+              className="kb-tree-readonly-badge"
+              data-testid="kb-tree-readonly-badge"
+              title="只读挂载：不能新建 / 重命名 / 删除"
+            >
+              只读
+            </span>
           )}
           {(!nodeProtected && node.ingestStatus) || showAddButton ? (
             <div className="kb-tree-trailing">
@@ -382,6 +418,7 @@ function TreeNodeItem({
               selectedFile={selectedFile}
               searchQuery={searchQuery}
               expandedPaths={expandedPaths}
+              hasExternalRoots={hasExternalRoots}
               revealToken={revealToken}
               revealPath={revealPath}
               onRevealConsumed={onRevealConsumed}
@@ -416,7 +453,9 @@ function TreeNodeItem({
   }
 
   // File node
-  const canDrag = !nodeProtected;
+  // No drag for protected dirs or read-only mounts (dragging a mounted file
+  // out of the mount is a move outside the vault).
+  const canDrag = !nodeProtected && !nodeReadonly;
 
   const handleDragStart = useCallback((e: React.DragEvent) => {
     if (!canDrag) {
@@ -453,12 +492,13 @@ function TreeNodeItem({
     <div
       ref={itemRef}
       className={`kb-tree-item ${isActive ? 'is-active' : ''} ${revealMatch ? 'just-moved' : ''}`}
+      {...(nodeReadonly ? { 'data-readonly': 'true' } : {})}
       onClick={() => !isRenaming && onSelectFile(node.path)}
       onContextMenu={handleFileContextMenu}
       draggable={canDrag}
       onDragStart={handleDragStart}
     >
-      <span className="kb-tree-icon">📄</span>
+      <span className="kb-tree-icon"><FileIcon size={14} /></span>
       {isRenaming ? (
         <RenameInput
           initialValue={node.name}

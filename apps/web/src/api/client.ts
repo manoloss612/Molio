@@ -11,10 +11,12 @@ import type {
   AuthStatus, SendCodeResponse, User, MeResponse,
   MarketRoleResponse,
   SkillManifestEntry, SkillDetailResponse, CreateSkillRequest, UpdateSkillRequest,
+  SkillQuarantineListResponse,
   ImportSkillRequest, PrefillResult, SkillImportPreviewResponse,
   HubSkillsQuery, HubSkillsListResponse, HubCategoriesResponse,
   InstallHubSkillRequest, InstallHubSkillResponse,
   HubSkillDetailQuery, HubSkillDetailResponse,
+  ExternalRoot, ExternalRootsResponse, AddExternalRootRequest,
   SaveQuizAttemptsRequest,
 } from '@molio/contracts';
 
@@ -560,7 +562,7 @@ export const api = {
    * 用于点击瞬间同步分流管理员 / 非管理员，见 stores/marketRoleStore。
    */
   async getMarketRole(): Promise<MarketRoleResponse> {
-    const res = await fetch(`${BASE}/market/role`);
+    const res = await daemonFetch(`${BASE}/market/role`);
     if (!res.ok) throw new Error(`Failed to fetch market role: ${res.status}`);
     return res.json();
   },
@@ -628,6 +630,50 @@ export const api = {
       body: JSON.stringify({ id }),
     });
     if (!res.ok) throw new Error(`Failed to set active vault: ${res.status}`);
+  },
+
+  // ─── External source roots（vault 挂载的只读外部目录） ───
+
+  /**
+   * List a vault's mounted source roots. `valid:false` means the target is gone
+   * from disk (or its mount link was removed out from under the registry) —
+   * the row is still returned so the UI can offer an unmount.
+   */
+  async listExternalRoots(vaultId: string): Promise<ExternalRoot[]> {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/external-roots`);
+    if (!res.ok) throw new Error(`Failed to fetch external roots: ${res.status}`);
+    const data = (await res.json()) as ExternalRootsResponse;
+    return data.roots;
+  },
+
+  /**
+   * Mount an external folder read-only under `<vault>/external/<label>`.
+   * `label` defaults to the target's basename. Throws with the daemon's message
+   * on a 400 (invalid target/label) or 409 (name or label already taken).
+   */
+  async addExternalRoot(vaultId: string, req: AddExternalRootRequest): Promise<ExternalRoot> {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/external-roots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error?.message ?? `Failed to mount external root: ${res.status}`);
+    }
+    const data = (await res.json()) as { root: ExternalRoot };
+    return data.root;
+  },
+
+  /** Unmount: drops the registry row and the mount link (204, no body). */
+  async removeExternalRoot(vaultId: string, rootId: string): Promise<void> {
+    const res = await daemonFetch(`${BASE}/knowledge/vaults/${vaultId}/external-roots/${rootId}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.error?.message ?? `Failed to unmount external root: ${res.status}`);
+    }
   },
 
   async getFileTree(vaultId: string): Promise<TreeNode[]> {
@@ -988,6 +1034,38 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message ?? `Failed to delete skill: ${res.status}`);
     }
+  },
+
+  /**
+   * Set/clear a skill's custom-instruction overlay (自定义指令). Works for
+   * bundled skills too — their ONLY sanctioned edit channel. Empty string
+   * clears. Survives app updates and hub refreshes by construction.
+   */
+  async updateSkillCustomInstructions(id: string, customInstructions: string): Promise<SkillManifestEntry> {
+    const res = await daemonFetch(`${BASE}/skills/${id}/custom-instructions`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customInstructions }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message ?? `Failed to update custom instructions: ${res.status}`);
+    }
+    const data = await res.json();
+    return data.skill;
+  },
+
+  /** Unacked quarantine events (safety-net banner in the skills settings). */
+  async listSkillQuarantine(): Promise<SkillQuarantineListResponse> {
+    const res = await daemonFetch(`${BASE}/skills/quarantine`);
+    if (!res.ok) throw new Error(`Failed to fetch quarantine events: ${res.status}`);
+    return res.json();
+  },
+
+  /** Dismiss one quarantine banner entry. */
+  async ackSkillQuarantine(id: number): Promise<void> {
+    const res = await daemonFetch(`${BASE}/skills/quarantine/${id}/ack`, { method: 'POST' });
+    if (!res.ok) throw new Error(`Failed to acknowledge quarantine event: ${res.status}`);
   },
 
   /** Stateless pre-import inspection (POST /api/skills/preview-import). */

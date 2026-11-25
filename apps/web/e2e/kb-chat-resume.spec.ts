@@ -67,7 +67,7 @@ test.describe('KB chat resume', () => {
         terminalGate,
         persistedMessages: [{ id: 'um1', role: 'user', content: '请生成一篇长文', timestamp: Date.now() }],
       });
-      await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
+      await page.goto(`/knowledge?vault=${vault.id}&file=doc.md`);
       await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 5_000 });
 
       // Keep the run active until the page has returned and resubscribed.
@@ -79,9 +79,9 @@ test.describe('KB chat resume', () => {
         .toBeVisible({ timeout: 5_000 });
 
       // 切走（卸载 KB 页 → unmount cleanup 调 reset 丢弃 run）→ 再返回 /knowledge
-      await page.goto('http://localhost:5173/history');
+      await page.goto('/history');
       await expect(page.locator('.history-shell')).toBeVisible({ timeout: 5_000 });
-      await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
+      await page.goto(`/knowledge?vault=${vault.id}&file=doc.md`);
       await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 5_000 });
 
       // 标签从 localStorage 恢复；重挂载后从 DB 加载（只有 user 消息）→ maybeResume 定位
@@ -100,7 +100,7 @@ test.describe('KB chat resume', () => {
     try {
       await mockChatRun(page, { frameDelay: 100, terminalGate });
       await mockHistoryConv(page);
-      await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
+      await page.goto(`/knowledge?vault=${vault.id}&file=doc.md`);
       await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 5_000 });
 
       // 发送 → 等 run 进入 running
