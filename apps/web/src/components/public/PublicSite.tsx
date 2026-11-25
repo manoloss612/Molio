@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import type { PublicGraph, PublicPage, PublicSite as PublicSiteDto } from '@molio/contracts';
 import { publicApi } from '../../api/publication';
@@ -6,6 +6,8 @@ import { translate, type Locale } from '../../i18n';
 import { renderPublicMarkdown } from './publicMarkdown';
 import { loadPublicSnapshot, PublicSnapshotError, type PublicSnapshotTarget } from './publicSnapshot';
 import './public.css';
+
+const PublicGraphCanvas = lazy(() => import('./PublicGraphCanvas').then((module) => ({ default: module.PublicGraphCanvas })));
 
 function publicLocale(): Locale {
   try { return window.localStorage.getItem('molio.locale') === 'en' ? 'en' : 'zh'; }
@@ -53,29 +55,8 @@ export function PublicSite() {
         {loading ? <p role="status">{t('publicWiki.loading')}</p> : error ? <p role="alert">{error}</p> : isGraph && graph ? <>
           <h1>{t('publicWiki.graphTitle')}</h1><p className="public-revision">{t('publicWiki.revision', { revision: graph.revision })}</p>
           <div className="public-graph" data-testid="public-graph">
-            <svg className="public-graph__canvas" viewBox="0 0 720 420" role="img" aria-label={t('publicWiki.graphTitle')}>
-              {(() => {
-                const points = new Map(graph.nodes.map((node, index) => {
-                  const angle = graph.nodes.length < 2 ? 0 : (Math.PI * 2 * index / graph.nodes.length) - Math.PI / 2;
-                  const radius = Math.min(155, 35 + graph.nodes.length * 18);
-                  return [node.id, { x: 360 + Math.cos(angle) * radius, y: 210 + Math.sin(angle) * radius }] as const;
-                }));
-                return <>
-                  <g className="public-graph__edges">{graph.edges.map((edge) => {
-                    const source = points.get(edge.source); const target = points.get(edge.target);
-                    return source && target ? <line key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} /> : null;
-                  })}</g>
-                  {graph.nodes.map((node) => {
-                    const point = points.get(node.id)!;
-                    return <a key={node.id} href={`/public/wiki/${node.id}`} data-testid={`public-graph-node-${node.id}`}>
-                      <circle cx={point.x} cy={point.y} r="12" />
-                      <text x={point.x} y={point.y + 34} textAnchor="middle">{node.title.length > 16 ? `${node.title.slice(0, 16)}…` : node.title}</text>
-                    </a>;
-                  })}
-                </>;
-              })()}
-            </svg>
-            <ul>{graph.nodes.map((node) => <li key={node.id}><Link to={`/public/wiki/${node.id}`}>{node.title}</Link><span>{graph.edges.filter((edge) => edge.source === node.id).map((edge) => titles.get(edge.target)).filter(Boolean).join('、') || t('publicWiki.noOutgoing')}</span></li>)}</ul>
+            <Suspense fallback={<p role="status">{t('publicWiki.loading')}</p>}><PublicGraphCanvas graph={graph} t={t} /></Suspense>
+            <ul>{graph.nodes.map((node) => <li key={node.id}><Link to={`/public/wiki/${node.id}`} data-testid={`public-graph-page-${node.id}`}>{node.title}</Link><span>{graph.edges.filter((edge) => edge.source === node.id).map((edge) => titles.get(edge.target)).filter(Boolean).join('、') || t('publicWiki.noOutgoing')}</span></li>)}</ul>
           </div>
         </> : page ? <article data-testid="public-wiki-page"><p className="public-revision">{t('publicWiki.revision', { revision: page.revision })}</p><h1>{title}</h1><div className="public-markdown" dangerouslySetInnerHTML={{ __html: html }} /></article> : !pageId ? <section><p className="public-revision">{t('publicWiki.revision', { revision: site?.revision ?? 0 })}</p><h1>{t('publicWiki.title')}</h1><ul>{site?.pages.map((item) => <li key={item.id}><Link to={`/public/wiki/${item.id}`}>{item.title}</Link></li>)}</ul></section> : <p role="alert">{t('publicWiki.unavailable')}</p>}
       </section>

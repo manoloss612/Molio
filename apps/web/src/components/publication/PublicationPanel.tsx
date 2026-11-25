@@ -32,6 +32,11 @@ export function PublicationPanel({ vaultId, tree, onClose }: { vaultId: string; 
 
   const published = useMemo(() => new Map((status?.pages ?? []).filter((page) => page.published).map((page) => [page.sourcePath, page])), [status]);
   const switchBlocked = !!status?.vaultId && status.vaultId !== vaultId && status.pages.some((page) => page.published);
+  const allSelected = files.length > 0 && files.every((sourcePath) => selected.has(sourcePath));
+  const selectedPublishedPageIds = [...selected].flatMap((sourcePath) => {
+    const page = published.get(sourcePath);
+    return page ? [page.id] : [];
+  });
   const toggle = (sourcePath: string, checked: boolean) => {
     setSelected((previous) => { const next = new Set(previous); if (checked) next.add(sourcePath); else next.delete(sourcePath); return next; });
     setPreview(null);
@@ -58,6 +63,19 @@ export function PublicationPanel({ vaultId, tree, onClose }: { vaultId: string; 
     catch (e) { setError(e instanceof Error ? e.message : '撤回失败'); }
     finally { setBusy(false); }
   };
+  const withdrawSelected = async () => {
+    if (!status || !selectedPublishedPageIds.length) return;
+    const pageIds = selectedPublishedPageIds;
+    if (!window.confirm(t('publicWiki.confirmWithdrawSelected', { count: pageIds.length }))) return;
+    setBusy(true); setError('');
+    try {
+      await publicationApi.withdraw({ expectedRevision: status.revision, pageIds });
+      setSelected(new Set());
+      setPreview(null);
+      await reload();
+    } catch (e) { setError(e instanceof Error ? e.message : '撤回失败'); }
+    finally { setBusy(false); }
+  };
   const toggleSite = async (enabled: boolean) => {
     if (!status) return;
     setBusy(true); setError('');
@@ -72,6 +90,7 @@ export function PublicationPanel({ vaultId, tree, onClose }: { vaultId: string; 
     {switchBlocked && <p className="publication-panel__warning" role="status">{t('publicWiki.switchBlocked')}</p>}
     <div className="publication-panel__site"><strong>{t('publicWiki.visitorSite')}</strong><label><input data-testid="publication-site-enabled" type="checkbox" checked={status?.enabled ?? false} disabled={!status || busy || switchBlocked} onChange={(e) => void toggleSite(e.target.checked)} />{t('publicWiki.allowVisitors')}</label><span>{t('publicWiki.revision', { revision: status?.revision ?? '—' })}</span></div>
     <div className="publication-panel__list" aria-label="Wiki 页面列表">
+      {files.length > 0 && <div className="publication-panel__list-actions"><button type="button" data-testid="publication-select-all" disabled={busy || switchBlocked} onClick={() => { setSelected(allSelected ? new Set() : new Set(files)); setPreview(null); }}>{allSelected ? t('publicWiki.deselectAll') : t('publicWiki.selectAll')}</button></div>}
       {files.length === 0 && <p>{t('publicWiki.noPages')}</p>}
       {files.map((sourcePath) => {
         const page = published.get(sourcePath);
@@ -82,7 +101,10 @@ export function PublicationPanel({ vaultId, tree, onClose }: { vaultId: string; 
         </div>;
       })}
     </div>
-    <footer className="publication-panel__actions"><button type="button" data-testid="publication-preview" disabled={!selected.size || busy || switchBlocked} onClick={() => void createPreview()}>{busy ? t('publicWiki.processing') : t('publicWiki.preview')}</button></footer>
+    <footer className="publication-panel__actions">
+      <button type="button" data-testid="publication-batch-publish" disabled={!selected.size || busy || switchBlocked} onClick={() => void createPreview()}>{busy ? t('publicWiki.processing') : t('publicWiki.batchPublish')}</button>
+      <button type="button" className="publication-panel__withdraw-selected" data-testid="publication-batch-withdraw" disabled={!selectedPublishedPageIds.length || busy || switchBlocked} onClick={() => void withdrawSelected()}>{t('publicWiki.batchWithdraw', { count: selectedPublishedPageIds.length })}</button>
+    </footer>
     {preview && <section className="publication-preview" aria-label="发布预览">
       <h3>{t('publicWiki.confirm')}</h3><p data-testid="publication-preview-revision">{t('publicWiki.revision', { revision: preview.expectedRevision })}</p><p data-testid="publication-preview-page-count">{t('publicWiki.pageCount', { count: preview.pageCount })} · {preview.totalBytes} bytes</p>
       {preview.warnings.map((warning) => <p className="publication-panel__warning" key={warning}>{warning}</p>)}
