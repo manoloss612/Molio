@@ -15,6 +15,9 @@ import * as path from 'path';
  * Prerequisites: `pnpm dev` running (daemon :3100, web :5173).
  */
 
+/** 剪贴板授权按 origin 精确匹配，必须绝对地址 —— 跟随 MOLIO_E2E_WEB_PORT 平移（见 playwright.config.ts 头注）。 */
+const WEB_ORIGIN = `http://localhost:${process.env.MOLIO_E2E_WEB_PORT ?? '5173'}`;
+
 let vault: TempVault;
 
 /** PNG 的 IHDR：8 字节签名 + 4 长度 + 4 "IHDR"，宽高各占 4 字节（大端）。 */
@@ -33,14 +36,17 @@ test.describe('Graph as tab', () => {
 
   test('NavRail 图谱 opens a graph tab in the KB workspace', async ({ page }) => {
     // Hold vault resolution until after the click: the graph intent must survive
-    // opening the page before its per-vault tab store has been created.
+    // opening the page before its per-vault tab store has been created, AND the
+    // vault-list arrival that follows the click (store → URL mirror) must not
+    // rewrite the query string while the navigation transition is still pending
+    // — a whole-query replace there wipes ?panel=graph and the tab never opens.
     let release!: () => void;
     const pending = new Promise<void>(resolve => { release = resolve; });
     await page.route('**/api/knowledge/vaults', async route => {
       await pending;
       await route.continue();
     });
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -54,7 +60,7 @@ test.describe('Graph as tab', () => {
   });
 
   test('graph tab stays mounted (keep-alive) when switching to a file tab', async ({ page }) => {
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -73,7 +79,7 @@ test.describe('Graph as tab', () => {
   test('dark theme: hidden (keep-alive) graph tab must not repaint the main area light', async ({ page }) => {
     // 深色主题在应用加载前写入 localStorage（否则首帧是浅色）
     await page.addInitScript(() => localStorage.setItem('molio.theme', 'dark'));
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     const alpha = page.locator('.kb-tree-item').filter({ hasText: 'alpha.md' });
@@ -99,7 +105,7 @@ test.describe('Graph as tab', () => {
   // （引擎没接上、canvas 是空白图，按钮照样可见）。
 
   test('导出图片：顶栏导出按钮真的产出一张 PNG', async ({ page }) => {
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -128,7 +134,7 @@ test.describe('Graph as tab', () => {
   });
 
   test('导出图片：1:1 版式真的产出正方形（卡片版式生效）', async ({ page }) => {
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -151,7 +157,7 @@ test.describe('Graph as tab', () => {
   });
 
   test('导出图片：关掉「附带信息」后卡片只剩图与署名', async ({ page }) => {
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -185,9 +191,9 @@ test.describe('Graph as tab', () => {
   test('导出图片：复制出口真的把 PNG 写进了剪贴板', async ({ page, context }) => {
     // 剪贴板读写都要授权（headless 下默认拒绝）
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
-      origin: 'http://localhost:5173',
+      origin: WEB_ORIGIN,
     });
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -215,7 +221,7 @@ test.describe('Graph as tab', () => {
     // 显式 data-theme="dark" 走另一条路（见上面的深色用例）。这里专测「跟随系统」
     // ——此时 html 上没有 data-theme，--text 变浅，气泡底色若仍是白的就成浅压浅。
     await page.emulateMedia({ colorScheme: 'dark' });
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -258,7 +264,7 @@ test.describe('Graph as tab', () => {
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err?.message ?? String(err)));
 
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     await clickNav(page, 'graph');
@@ -276,7 +282,7 @@ test.describe('Graph as tab', () => {
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err?.message ?? String(err)));
 
-    await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}`);
+    await page.goto(`/knowledge?vault=${vault.id}`);
     await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 10_000 });
 
     // 开一个文档 tab，再右键 → 分屏-图谱

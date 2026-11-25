@@ -12,7 +12,9 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 
-const WEB = 'http://localhost:5173';
+/** web 基址：自建 context（browser.newContext）不继承 config 的 baseURL，必须绝对地址；
+ *  跟随 MOLIO_E2E_WEB_PORT 平移（见 playwright.config.ts 头注）。 */
+const WEB = `http://localhost:${process.env.MOLIO_E2E_WEB_PORT ?? '5173'}`;
 const DAEMON_API = `http://localhost:${process.env.MOLIO_E2E_DAEMON_PORT ?? '3100'}/api`;
 
 async function createVault(name: string, vaultPath: string): Promise<string> {
@@ -93,6 +95,13 @@ test.describe('multi-window vault isolation', () => {
     const popup = await popupPromise;
     await popup.waitForURL(/vault=/);
     expect(new URL(popup.url()).searchParams.get('vault')).toBe(vaultBId);
+
+    // 新窗口带着管理器直接打开（URL 上的 manage=1），右栏作用域就是刚选的仓库
+    // —— 「选仓库 → 配置它（挂外部素材根）」不需要在新窗口里再点开一次。
+    await expect(popup.locator('.vm-overlay')).toBeVisible({ timeout: 5_000 });
+    await expect(popup.locator('[data-testid="external-root-scope"]')).toHaveText('mw-b');
+    // 参数是一次性意图，打开后即剥掉，刷新/克隆这个 URL 不会再弹。
+    await expect.poll(() => new URL(popup.url()).searchParams.get('manage')).toBeNull();
 
     // Window A is untouched — still pinned to vault A.
     await expect(pageA.locator('.kb-vault-bar__name')).toHaveText('mw-a');
@@ -285,6 +294,58 @@ test.describe('multi-window vault isolation', () => {
       timeout: 10_000,
     });
     expect(popup.url()).not.toContain('vault=');
+    await ctx.close();
+  });
+
+  test('reuse mode: cross-vault pick switches IN PLACE, no popup, manager stays open', async ({ browser }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    // 开关是 localStorage 偏好：addInitScript 在应用代码跑之前种值。
+    await page.addInitScript(() => localStorage.setItem('molio.vaultSwitchWindow', 'reuse'));
+    await page.goto(`${WEB}/knowledge?vault=${vaultAId}`);
+    await expect(page.locator('.kb-vault-bar__name')).toHaveText('mw-a');
+
+    let popups = 0;
+    page.on('popup', () => { popups += 1; });
+    await page.locator('.kb-vault-bar').click();
+    await page.locator('.vm-vault-item', { hasText: 'mw-b' }).click();
+
+    // 就地切换：vault bar 与 URL 都指向 B（此时若会弹窗，早已弹出，计数确定）。
+    await expect(page.locator('.kb-vault-bar__name')).toHaveText('mw-b');
+    await expect.poll(() => new URL(page.url()).searchParams.get('vault')).toBe(vaultBId);
+    expect(popups).toBe(0);
+
+    // 管理器不收起（selectVault 不隐式关面板——picker 交互不许砍）。
+    await expect(page.locator('.vm-overlay')).toBeVisible();
+    // 右栏作用域跟随新库。
+    await expect(page.locator('[data-testid="external-root-scope"]')).toHaveText('mw-b');
+    await ctx.close();
+  });
+
+  test('reuse mode: explicit new-window entrances still open a new window', async ({ browser }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    await page.addInitScript(() => localStorage.setItem('molio.vaultSwitchWindow', 'reuse'));
+    await page.goto(`${WEB}/knowledge?vault=${vaultAId}`);
+    await expect(page.locator('.kb-vault-bar__name')).toHaveText('mw-a');
+
+    // 1) tab 右键「在新窗口打开」——显式动作，恒新窗，不读开关。
+    await page.locator('.kb-tree-item', { hasText: 'alpha.md' }).first().click();
+    await expect(page.locator('.kb-wtab', { hasText: 'alpha.md' })).toBeVisible();
+    const popupPromise = page.waitForEvent('popup');
+    await page.locator('.kb-wtab', { hasText: 'alpha.md' }).click({ button: 'right' });
+    await page.locator('[data-testid="tab-open-in-new-window"]').click();
+    const popup1 = await popupPromise;
+    await popup1.waitForURL(/vault=/);
+    expect(popup1.url()).toContain('alpha.md');
+
+    // 2) 新建下拉「新窗口」——同样不受开关影响，且不带 vault。
+    const popupPromise2 = page.waitForEvent('popup');
+    await page.locator('[data-testid="kb-btn-create"]').click();
+    await page.locator('[data-testid="kb-create-window"]').click();
+    const popup2 = await popupPromise2;
+    await popup2.waitForURL((url) => url.href.startsWith(WEB) && url.pathname !== '/');
+    expect(popup2.url()).not.toContain('vault=');
     await ctx.close();
   });
 });

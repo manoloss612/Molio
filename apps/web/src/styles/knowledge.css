@@ -27,6 +27,146 @@
   position: relative;
 }
 
+/* 折叠态：书脊细竖条。min/max-width 必须跟着收到同一宽度，否则内联 width:28
+   会被展开态的 min-width:180 顶回去。 */
+.kb-file-panel--collapsed {
+  min-width: 28px;
+  max-width: 28px;
+}
+
+/* 折叠/展开的宽度过渡只挂在 --animating 上（组件在点击后约一个动画时长内
+   摘掉它）：transition:width 若常驻，「拖拽调宽」每帧都朝目标缓动，手感变成
+   橡皮筋。动画窗口内同时松开 min/max，内联 width 才能在 28 ↔ 260 间自由
+   过渡——本规则必须在 --collapsed 之后，两条并存（折叠动画中）时以它为准。 */
+.kb-file-panel--animating {
+  transition: width 240ms cubic-bezier(0.4, 0, 0.2, 1);
+  min-width: 0;
+  max-width: none;
+}
+
+/* 面板主体：折叠时整层淡出让位给书脊（inert 由组件控制）。visibility 必须跟着
+   翻转——只 opacity:0 的话，读屏和 Playwright 都仍视其为可见；visibility 延迟
+   到淡出完成后再隐藏，动画节奏不被截断。 */
+.kb-file-panel__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 160ms ease, visibility 0s;
+}
+.kb-file-panel--collapsed .kb-file-panel__body {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease, visibility 0s linear 120ms;
+}
+
+/* 书脊：顶部展开按钮 + 竖排库名。常驻挂载，靠 visibility/opacity 显隐——
+   折叠方向：visibility 立即可见、透明度延迟 120ms 淡入（面板先开始收窄，
+   书脊随后浮现）；展开方向：先 160ms 淡出让位，visibility 再隐藏
+   （visibility 延迟必须 ≥ 透明度时长，否则淡出被截断）。 */
+.kb-file-rail {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 8px;
+  background: var(--bg);
+  opacity: 0;
+  visibility: hidden;
+  cursor: pointer;
+  transition: opacity 160ms ease, visibility 0s linear 160ms;
+}
+.kb-file-panel--collapsed .kb-file-rail {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 200ms ease 120ms, visibility 0s;
+}
+.kb-file-rail__expand {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 120ms ease;
+}
+.kb-file-rail__expand svg {
+  width: 15px;
+  height: 15px;
+}
+.kb-file-rail__expand:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+/* 悬停书脊任意处（含空白区）：内容整体提亮——图标转正色、库名转 accent。
+   只提内容不动背景：整条底色一变会和展开按钮自己的 bg-subtle 方块、
+   拖放指示器互相压；「这整条能点」的线索由内容亮度承担。 */
+.kb-file-panel--collapsed .kb-file-rail:hover .kb-file-rail__expand {
+  color: var(--text);
+}
+.kb-file-panel--collapsed .kb-file-rail:hover .kb-file-rail__name {
+  color: var(--accent);
+}
+/* 库名插槽：在展开按钮之下的剩余高度里纵向居中（书脊排印惯例——
+   真书脊的书名就是居中排的）。padding-bottom 做光学修正：上方按钮
+   有视觉重量，纯数学中心会显得偏低。 */
+.kb-file-rail__name-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 14px;
+}
+/* 书脊库名：竖排（中文直立、西文旋转——mixed 是书脊的自然读法），超长省略。
+   也是折叠态的切库控件：hover 提亮为 accent 色，与「展开」的灰色按钮区分开。
+   padding 是命中区而非留白：竖排下按钮物理宽度只有一个字号（≈12px），
+   左右各垫 7px 撑到与展开按钮同宽（26px），上下垫 8px 给一两字的短名兜底。 */
+.kb-file-rail__name {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: var(--text-muted);
+  border: none;
+  background: transparent;
+  padding: 8px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-height: 100%;
+  user-select: none;
+  transition: color 120ms ease;
+}
+
+/* 减少动态效果：折叠/展开直接落位（visibility 仍瞬时翻转） */
+@media (prefers-reduced-motion: reduce) {
+  .kb-file-panel--animating {
+    transition: none;
+  }
+  .kb-file-panel__body,
+  .kb-file-panel--collapsed .kb-file-panel__body {
+    transition: none;
+  }
+  .kb-file-rail,
+  .kb-file-panel--collapsed .kb-file-rail {
+    transition: visibility 0s;
+  }
+}
+
 /* Top toolbar */
 .kb-file-toolbar {
   padding: 8px 12px;
@@ -373,7 +513,7 @@
 .kb-tree-item.is-active { background: var(--accent-tint); color: var(--accent); font-weight: 500; }
 .kb-tree-item.is-active .kb-tree-icon { opacity: 0.8; }
 
-.kb-tree-item .kb-tree-icon { font-size: 13px; opacity: 0.5; flex-shrink: 0; }
+.kb-tree-item .kb-tree-icon { font-size: 13px; opacity: 0.68; flex-shrink: 0; display: inline-flex; align-items: center; }
 
 .kb-tree-item .kb-tree-actions {
   display: none;
@@ -653,10 +793,14 @@
 }
 .kb-fm-pill-toggle:hover { background: var(--bg-hover); color: var(--text); }
 
+.kb-fm-badge-icon { display: inline-flex; align-items: center; }
+/* 内联 SVG 默认落在文字基线上，视觉中心偏低；各处统一上提 2px 对齐文字中线 */
+.wiki-cta-btn svg, .kb-outline-header svg, .kb-search-result-file svg, .kb-modal-body svg { vertical-align: -2px; }
+.kb-search-icon { display: inline-flex; align-items: center; }
 .kb-fm-badge {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 5px;
   padding: 1px 8px;
   background: var(--bg-muted);
   border: 1px solid var(--border);
@@ -756,6 +900,11 @@
   flex-shrink: 0;
   min-width: 80px;
   white-space: nowrap;
+}
+.kb-fm-key-icon {
+  display: inline-flex;
+  margin-right: 4px;
+  vertical-align: -2px;
 }
 .kb-fm-val {
   color: var(--text);
@@ -882,7 +1031,8 @@
 .kb-empty-state .kb-empty-icon {
   font-size: 48px;
   margin-bottom: 16px;
-  opacity: 0.3;
+  opacity: 0.45;
+  color: var(--text-muted);
 }
 
 .kb-empty-state h3 {
@@ -1198,6 +1348,7 @@
 .kb-load-error-icon {
   font-size: 32px;
   margin-bottom: 4px;
+  color: var(--text-muted);
 }
 
 .kb-load-error-title {
@@ -1766,8 +1917,14 @@
   position: relative;
 }
 
+/* Column header over the vault list. The right column has no matching bar —
+   its brand block is centred in the panel body instead. */
 .vm-list-header {
-  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  height: 48px;
+  padding: 0 20px;
+  flex-shrink: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
@@ -1899,14 +2056,61 @@
 
 /* ── Right: Action Panel ── */
 .vm-modal-right {
+  position: relative; /* anchors .vm-close */
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Picking a vault no longer dismisses the panel, so leaving it has to be
+   something you can see. Sits in the gutter next to the content, which is
+   capped at 520px — it only overlaps once the column gets narrow. */
+.vm-close {
+  position: absolute;
+  z-index: 1;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.vm-close:hover {
+  background: var(--bg-muted);
+  color: var(--text-strong);
+}
+
+/* `flex-start` + the children's `margin-block: auto` (below) is the
+   overflow-safe way to centre: once the content is taller than the body, the
+   auto margins collapse and the top stays reachable by scrolling.
+   `justify-content:center` would clip it above the scroll origin instead. */
+.vm-panel-body {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   overflow-y: auto;
-  padding: 40px 32px;
-  background: var(--bg);
+  padding: 28px 32px;
+}
+
+.vm-action-panel,
+.vm-create-form {
+  margin-block: auto;
 }
 
 .vm-action-panel {
@@ -1914,53 +2118,67 @@
   max-width: 520px;
   display: flex;
   flex-direction: column;
-  align-items: center;
 }
 
-/* Branding */
+/* ── Branding ── */
 .vm-brand {
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin-bottom: 48px;
+  margin-bottom: 26px;
 }
 
 .vm-brand-logo {
-  font-size: 64px;
-  margin-bottom: 16px;
-  opacity: 0.8;
+  margin-bottom: 10px;
+  opacity: 0.9;
+}
+.vm-brand-logo img {
+  width: 48px;
+  height: 48px;
+  display: block;
 }
 
 .vm-brand-title {
-  font-size: 28px;
+  font-size: 22px;
   font-weight: 700;
   color: var(--text-strong);
   letter-spacing: -0.02em;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .vm-brand-version {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Action cards */
+/* ── App-level actions ── */
+/* The whole card is the target — the original carried a second button on the
+   right, which said the same thing twice and ate the width the descriptions
+   needed. These apply to the collection, not to any one vault; the
+   vault-scoped block below is set apart by a rule and names its vault, so the
+   two scopes never read as one list of three. */
 .vm-actions {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .vm-action-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  gap: 16px;
+  width: 100%;
+  padding: 13px 18px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  transition: all 120ms ease;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .vm-action-card:hover {
@@ -1973,16 +2191,34 @@
   min-width: 0;
 }
 
+/* The copy sits inside a <button>, so each line has to be blockified by hand. */
+.vm-action-title,
+.vm-action-desc {
+  display: block;
+}
+
 .vm-action-title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-strong);
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .vm-action-desc {
   font-size: 12.5px;
   color: var(--text-muted);
+}
+
+.vm-action-go {
+  flex-shrink: 0;
+  font-size: 15px;
+  color: var(--text-faint);
+  transition: color 120ms ease, transform 120ms ease;
+}
+
+.vm-action-card:hover .vm-action-go {
+  color: var(--accent);
+  transform: translateX(2px);
 }
 
 .vm-action-btn {
@@ -2006,14 +2242,169 @@
   border-color: var(--border-strong);
 }
 
-.vm-action-btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+/* ── External source roots (read-only mounts) ── */
+/* Vault-scoped: everything here belongs to the vault highlighted in the left
+   column. The rule divides it from the app-level cards above, and the kicker
+   names the vault outright — together they keep this block from reading as a
+   third card in that list. */
+.vm-roots {
+  width: 100%;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
 }
 
-.vm-action-btn-primary:hover {
-  background: var(--accent-hover);
+/* The hint isn't scoped to anything, so it drops the rule that would otherwise
+   announce a scope it doesn't have. */
+.vm-roots.is-idle {
+  border-top: none;
+  padding-top: 0;
+}
+
+.vm-scope {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.vm-scope-id {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+}
+
+.vm-scope-kicker {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.vm-scope-sep {
+  color: var(--text-faint);
+}
+
+.vm-scope-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vm-roots-note {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* Unmounted / broken mounts. No inner scroll — the panel body is the only
+   scroll container, so there is never a scrollbar nested in a scrollbar. */
+.vm-roots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vm-roots-empty {
+  font-size: 12.5px;
+  color: var(--text-faint);
+  padding: 2px 0;
+}
+
+.vm-root-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/* Target gone from disk — the row stays so it can be unmounted. */
+.vm-root-item.is-invalid {
+  border-color: var(--red-border);
+  background: var(--red-bg);
+}
+
+.vm-root-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.vm-root-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.vm-root-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--red, #dc2626);
+  border: 1px solid currentColor;
+}
+
+.vm-root-target {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vm-root-remove {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.vm-root-remove:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.vm-root-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.vm-roots-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.vm-roots-form .vm-form-input {
+  flex: 1;
+}
+
+.vm-roots-error {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--red, #dc2626);
+  line-height: 1.5;
 }
 
 /* ── Create Vault Form ── */
@@ -2086,6 +2477,7 @@
 
 .vm-form-row {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
 
@@ -2325,6 +2717,21 @@
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* Read-only marker on the top of a mounted external source (`external/<label>`).
+   Everything under it rejects new / rename / delete / drag. */
+.kb-tree-readonly-badge {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 3px;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 /* Cancel the `+` button's auto-margin now that it lives inside a trailing group */
@@ -3070,6 +3477,18 @@
   z-index: 10;
   pointer-events: none;
 }
+/* 折叠态变体：书脊只有 28px 宽，横排文本「释放到根目录」会溢出——换成
+   无文字的整条高亮（accent-soft 铺满 + 左缘 accent 条），语义不变：
+   拖到书脊 = 释放到当前库根目录。 */
+.kb-file-panel--collapsed.drag-over-root::after {
+  content: '';
+  top: 0;
+  height: auto;
+  color: transparent;
+  font-size: 0;
+  border-top: none;
+  border-left: 2px solid var(--accent);
+}
 
 /* ── Directory drop-target highlight ──
    Two-level highlight with visual hierarchy:
@@ -3293,6 +3712,8 @@
 
 .file-chat-empty-icon {
   font-size: 36px;
+  color: var(--text-muted);
+  opacity: 0.6;
 }
 
 /* Selected text preview in empty state */
@@ -3405,7 +3826,7 @@
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
-.chat-session-tab-icon { flex-shrink: 0; }
+.chat-session-tab-icon { flex-shrink: 0; display: inline-flex; align-items: center; }
 .chat-session-tab-title {
   overflow: hidden;
   text-overflow: ellipsis;

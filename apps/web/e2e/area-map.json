@@ -52,7 +52,12 @@
         "apps/web/src/utils/quizFile.*",
         "apps/web/src/hooks/useWikiLinkClick.*",
         "apps/web/src/components/SandboxCard.*",
-        "apps/web/src/utils/ruleSandbox.*"
+        "apps/web/src/utils/ruleSandbox.*",
+        "packages/contracts/src/quiz.*",
+        "packages/contracts/src/messageSegments.*",
+        "apps/web/src/stores/chatScrollMemory.*",
+        "apps/web/src/components/MessageRail.*",
+        "apps/web/src/utils/messageRail.*"
       ],
       "specs": [
         "chat-single",
@@ -89,7 +94,9 @@
         "composer-file-picker",
         "composer-ime",
         "run-progress",
-        "source-chips-spacing"
+        "source-chips-spacing",
+        "chat-scroll-memory",
+        "kb-message-rail"
       ]
     },
     "kb": {
@@ -110,7 +117,9 @@
         "apps/daemon/src/routes/maintenance.ts",
         "apps/web/src/stores/splitViewStore*",
         "apps/web/src/hooks/useCompanionFile*",
-        "apps/web/src/components/kb/CompanionHeader*"
+        "apps/web/src/components/kb/CompanionHeader*",
+        "apps/web/src/components/ConversationHistoryMenu*",
+        "apps/web/src/utils/vaultSwitchWindow*"
       ],
       "specs": [
         "create-vault-form",
@@ -149,7 +158,10 @@
         "kb-tab-drag",
         "kb-tabs",
         "kb-tree-folder-state",
-        "navigation-history"
+        "navigation-history",
+        "kb-sse-focus",
+        "kb-external-roots",
+        "kb-message-rail"
       ]
     },
     "publish": {
@@ -203,7 +215,9 @@
         "graph-local",
         "split-view",
         "graph-camera",
-        "graph-live-refresh"
+        "graph-live-refresh",
+        "graph-resize-flash",
+        "graph-trunk"
       ]
     },
     "navigation": {
@@ -254,7 +268,13 @@
       "paths": [
         "apps/web/src/components/history*",
         "apps/web/src/hooks/useHistory*",
-        "apps/web/src/hooks/historyFilterQuery*"
+        "apps/web/src/hooks/historyFilterQuery*",
+        "apps/web/src/components/history/*",
+        "apps/web/src/components/ConversationHistoryMenu*",
+        "apps/web/src/utils/historySummary.*",
+        "apps/daemon/src/core/quiz-trace.*",
+        "packages/contracts/src/api.*",
+        "packages/contracts/src/index.*"
       ],
       "specs": [
         "history"
@@ -335,7 +355,9 @@
         "kb-folder-ops",
         "kb-folder-drag-real",
         "kb-file-drag-real",
-        "kb-folder-root-drop"
+        "kb-folder-root-drop",
+        "kb-panel-collapse",
+        "market-community"
       ]
     },
     "market": {
@@ -688,7 +710,6 @@
       "priority": "P1",
       "file": "kb-tree-refresh-search.spec.ts"
     },
-
     "composer-skill-palette": {
       "priority": "P1",
       "file": "composer-skill-palette.spec.ts"
@@ -772,6 +793,42 @@
     "publication-server": {
       "priority": "P1",
       "file": "publication-server.spec.ts"
+    },
+    "kb-message-rail": {
+      "priority": "P1",
+      "file": "kb-message-rail.spec.ts"
+    },
+    "graph-resize-flash": {
+      "priority": "P1",
+      "file": "graph-resize-flash.spec.ts"
+    },
+    "chat-scroll-memory": {
+      "priority": "P1",
+      "file": "chat-scroll-memory.spec.ts"
+    },
+    "kb-sse-focus": {
+      "priority": "P1",
+      "file": "kb-sse-focus.spec.ts"
+    },
+    "kb-external-roots": {
+      "priority": "P1",
+      "file": "kb-external-roots.spec.ts"
+    },
+    "graph-trunk": {
+      "priority": "P1",
+      "file": "graph-trunk.spec.ts"
+    },
+    "skill-hub-real-install": {
+      "priority": "P2",
+      "file": "skill-hub-real-install.spec.ts"
+    },
+    "kb-panel-collapse": {
+      "priority": "P1",
+      "file": "kb-panel-collapse.spec.ts"
+    },
+    "upstream-server-api": {
+      "priority": "P0",
+      "file": "upstream-server-api.spec.ts"
     }
   }
 }

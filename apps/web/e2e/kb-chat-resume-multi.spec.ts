@@ -174,7 +174,7 @@ test.describe('KB chat resume multi-session', () => {
   test('两个会话同时流式，切页返回后都恢复直播', async ({ page }) => {
     const releaseStreams = await mockTwoRuns(page);
     try {
-      await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
+      await page.goto(`/knowledge?vault=${vault.id}&file=doc.md`);
       await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 5_000 });
 
       // 会话1：发送消息一 → 进入流式
@@ -195,9 +195,9 @@ test.describe('KB chat resume multi-session', () => {
         .toHaveCount(2, { timeout: 5_000 });
 
       // 切页离开（卸载 KB 页 → 两个会话的 SSE 都断开）→ 返回
-      await page.goto('http://localhost:5173/history');
+      await page.goto('/history');
       await expect(page.locator('.history-shell')).toBeVisible({ timeout: 5_000 });
-      await page.goto(`http://localhost:5173/knowledge?vault=${vault.id}&file=doc.md`);
+      await page.goto(`/knowledge?vault=${vault.id}&file=doc.md`);
       await expect(page.locator('.kb-shell')).toBeVisible({ timeout: 5_000 });
       releaseStreams();
 

@@ -1,7 +1,8 @@
 // apps/web/src/components/kb/ChatSessionTabBar.tsx
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatSessionTab } from '../../stores/kbChatSessionsStore';
 import { ConversationHistoryMenu } from '../ConversationHistoryMenu';
+import { ChatIcon, BookIcon } from '../icons';
 
 interface Props {
   sessions: ChatSessionTab[];
@@ -80,6 +81,12 @@ export function ChatSessionTabBar({ sessions, activeSessionId, runningSessionIds
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
   const renameCancelRef = useRef(false);
+
+  // 历史下拉要标出「当前这条会话」——取活动标签的 conversationId。
+  const activeConversationId = useMemo(
+    () => sessions.find((s) => s.id === activeSessionId)?.conversationId ?? null,
+    [sessions, activeSessionId],
+  );
 
   const recompute = () => {
     const el = scrollRef.current;
@@ -173,7 +180,7 @@ export function ChatSessionTabBar({ sessions, activeSessionId, runningSessionIds
               }}
             >
               {isRunning && <span className="chat-session-tab-running" data-testid="kb-chat-session-running" />}
-              <span className="chat-session-tab-icon">{s.mode === 'qa' ? '💬' : '⚙️'}</span>
+              <span className="chat-session-tab-icon">{s.mode === 'qa' ? <ChatIcon size={13} /> : <BookIcon size={13} />}</span>
               {editingId === s.id ? (
                 <input
                   className="chat-session-tab-rename"
@@ -229,6 +236,8 @@ export function ChatSessionTabBar({ sessions, activeSessionId, runningSessionIds
         align="down"
         buttonClassName="chat-session-tab-history"
         buttonTestId="kb-chat-session-history"
+        // 历史下拉里高亮「当前这条会话」——否则用户分不清自己在看哪条
+        activeConversationId={activeConversationId}
       />
       <button
         type="button"

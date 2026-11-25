@@ -1,19 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { useI18n } from '../i18n';
-import { useActiveVaultId } from '../stores/vaultStore';
-import { quizAnchorStore, useQuizAnswerAnchor } from '../stores/quizAnchorStore';
+import { useActiveVaultId, useVaults } from '../stores/vaultStore';
 import { useQuizSubjects } from '../stores/quizSubjectStore';
-import { anchorBelongsToQuestion, backfillAnchorFingerprint, gradingMapKey } from '../utils/quizAnswer';
+import {
+  buildQuizSubmissionMessage,
+  mergeSubjectDrafts,
+  splitSubjectBody,
+  subjectImageMarkdown,
+  gradingMapKey,
+  type SubjectAnswerEntry,
+} from '../utils/quizAnswer';
 import { useWikiLinkClick } from '../hooks/useWikiLinkClick';
+import { useFileNavigation } from '../hooks/useFileNavigation';
+import { isRevealAvailable, revealInFolder } from '../utils/reveal';
 import { CodeBlock } from './CodeBlock';
 import { renderMarkdown } from '../utils/markdown';
 import { preprocessLocalImages } from '../utils/kbImage';
-import { saveQuizToVault } from '../utils/quizFile';
+import { saveQuizToVault, type QuizFileInput } from '../utils/quizFile';
+import {
+  buildQuizFileQuestions,
+  classifyQuestions,
+  pickDefaultScope,
+  selectForSave,
+  type QuizSaveContext,
+  type QuizSaveScope,
+} from '../utils/quizSaveScope';
 import {
   parseQuizBlock,
   gradeQuiz,
-  isQuizComplete,
+  countQuizAnswered,
   isSubjectQuestion,
   computeQuizFingerprint,
   quizStorageKey,
@@ -27,6 +43,9 @@ import {
   type QuizSelections,
 } from '../utils/quiz';
 
+/** 存档结果行的动作按钮存活时长（与 SaveToKbButton 的反馈窗一致）。 */
+const SAVE_ACTIONS_WINDOW_MS = 6000;
+
 interface Props {
   /** JSON text inside the ```quiz fence. */
   raw: string;
@@ -36,10 +55,28 @@ interface Props {
   streaming?: boolean;
   /** Used for localStorage scoping. */
   conversationId?: string | null;
+  /** 会话所属库（daemon 的 conversations.vault_id）；取不到时回落活动库。 */
+  conversationVaultId?: string | null;
+  /** 整卷交卷：宿主发送链（ChatSessionView 的 onSubmitForm → handleSend 兜底）。
+   *  undefined = 宿主不可达（无 runtime 的替换区等）→ 含解答草稿时禁用交卷。 */
+  onSubmitPaper?: (message: string) => void;
+  /** 宿主发送链当前不可用（无可用 runtime / composer 被整块替换）。 */
+  paperSubmitDisabled?: boolean;
+  /** 会话级 run 是否进行中（批改中 pill 的呼吸态依据；run 结束仍无回写 → 「已交卷」）。 */
+  conversationRunning?: boolean;
 }
 
 /** 填空符号托盘：通用难输入字符（理工科一期组）。分组与后置项依据
  *  docs/2026-10-24-quiz-fill-input-domains.md（文科/小语种组后续按需追加）。 */
+/** 列表里的一行题面：去掉图片语法与强调标记，压成单行（CSS 再负责省略号）。 */
+function previewStem(stem: string): string {
+  return stem
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/[*_`#>]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 const FILL_SYMBOL_GROUPS: ReadonlyArray<{ labelKey: string; chars: readonly string[] }> = [
   { labelKey: 'quiz.symbolGroup.common', chars: ['√', 'π', '°', '≤', '≥', '≠', '±', '→', '×', '÷', '∞'] },
   { labelKey: 'quiz.symbolGroup.greek', chars: ['α', 'β', 'γ', 'δ', 'θ', 'λ', 'μ', 'σ', 'ω', 'Δ', 'Ω'] },
@@ -54,7 +91,7 @@ const FILL_SYMBOL_GROUPS: ReadonlyArray<{ labelKey: string; chars: readonly stri
  * （先转义 HTML 再生成受控标签，与聊天正文同一信任级）。
  * 判分在本地完成（不依赖 runtime 工具调用），提交后可重做、可存题库。
  */
-export function QuizCard({ raw, complete, streaming, conversationId }: Props) {
+export function QuizCard({ raw, complete, streaming, conversationId, conversationVaultId, onSubmitPaper, paperSubmitDisabled, conversationRunning }: Props) {
   const { t } = useI18n();
   const parsed = useMemo(() => parseQuizBlock(raw), [raw]);
 
@@ -80,6 +117,10 @@ export function QuizCard({ raw, complete, streaming, conversationId }: Props) {
       quiz={parsed.quiz}
       invalidQuestions={parsed.invalidQuestions}
       conversationId={conversationId}
+      conversationVaultId={conversationVaultId}
+      onSubmitPaper={onSubmitPaper}
+      paperSubmitDisabled={paperSubmitDisabled}
+      conversationRunning={conversationRunning}
     />
   );
 }
@@ -88,17 +129,28 @@ function QuizBody({
   quiz,
   invalidQuestions,
   conversationId,
+  conversationVaultId,
+  onSubmitPaper,
+  paperSubmitDisabled,
+  conversationRunning,
 }: {
   quiz: Quiz;
   invalidQuestions: InvalidQuestion[];
   conversationId?: string | null;
+  conversationVaultId?: string | null;
+  onSubmitPaper?: (message: string) => void;
+  paperSubmitDisabled?: boolean;
+  conversationRunning?: boolean;
 }) {
   const { t } = useI18n();
-  const vaultId = useActiveVaultId();
+  // 会话所属库优先：历史会话跨库打开时，活动库不是它自己的库。取不到
+  // （老 daemon / 会话已删 / 首轮消息还没落库）再回落活动库。卡内传图走同一
+  // 归属（uploadAsset 落会话库，不是活动库硬编码——跨库历史会话传错库会裂图）。
+  const activeVaultId = useActiveVaultId();
+  const vaultId = conversationVaultId ?? activeVaultId;
   const handleWikiLinkClick = useWikiLinkClick();
-  const quizAnchor = useQuizAnswerAnchor();
-  // 本会话的解答题状态（键 = 指纹:题号）：已作答 + 批改结果。两者都从会话
-  // 消息序推导（作答发生在聊天输入框里，题卡本地无从得知）。
+  // 本会话的解答题状态（键 = 指纹:题号）：已作答 + 批改结果。都从会话消息序
+  // 推导——交卷消息与批改回复是消息流里的事实，历史刷新后重算即可回写。
   const subjectStates = useQuizSubjects(conversationId);
   const [openGradingFor, setOpenGradingFor] = useState<string | null>(null);
 
@@ -110,13 +162,33 @@ function QuizBody({
   );
 
   const [fingerprint, setFingerprint] = useState<string | null>(null);
-  // 卡片身份（内容派生的 quiz 指纹前 8 位）：答题锚的归属判定键。
+  // 卡片身份（内容派生的 quiz 指纹前 8 位）：解答题状态/批改回写的关联键。
   const fingerprintKey = fingerprint?.slice(0, 8) ?? '';
   const [selections, setSelections] = useState<QuizSelections>({});
+  // 解答题草稿图（题目 id → vault 相对路径）：与 selections/submitted 同键持久化。
+  const [subjectImages, setSubjectImages] = useState<Record<string, string[]>>({});
   const [submitted, setSubmitted] = useState(false);
+  // 未答完确认条（amber）：点提交且还有空题时展开，「仍要交卷」二次放行。
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  // 卡内传图：上传中的题（按钮禁用）＋ 失败的题（工具行旁提示）。
+  const [uploadingFor, setUploadingFor] = useState<string | null>(null);
+  const [uploadErrorFor, setUploadErrorFor] = useState<string | null>(null);
+  // 存档：面板 + 范围 + 勾选。错题优先是默认，但永远由用户按下确认才写盘。
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [scope, setScope] = useState<QuizSaveScope>('wrong');
+  const [picked, setPicked] = useState<ReadonlySet<number>>(new Set());
   const [saving, setSaving] = useState(false);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  // setState 是异步的：连点两次时第二次进来 saving 仍是 false，会写两份文件。
+  const savingRef = useRef(false);
+  const [saved, setSaved] = useState<{ path: string; count: number } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [undoing, setUndoing] = useState(false);
+  const [undoError, setUndoError] = useState<string | null>(null);
+  const undoRef = useRef(false);
+  // 结果行的动作按钮只开 6s 反馈窗（与 SaveToKbButton 一致：2.5s 对非技术用户太短，
+  // 但不能常驻——写盘是低频动作，留下来会一直占着卡片底部）。窗口过后只剩一行静态路径。
+  const [saveActionsVisible, setSaveActionsVisible] = useState(false);
+  const saveActionsTimerRef = useRef<number | null>(null);
   const restoredKeyRef = useRef<string | null>(null);
 
   const grades = useMemo(
@@ -127,34 +199,96 @@ function QuizBody({
     () => new Map<string, QuizGrade>(grades.map((grade) => [grade.questionId, grade])),
     [grades],
   );
-  // 主观题不进本地判分批次（本地判不了开放题），但**要进进度统计**：
-  // 统计口径 = 整张卷子的题数，否则「已作答 3/3」会漏掉解答题——用户看到
-  // 的是一张 4 题的卷子，却被告已完成 3/3。
-  const gradableQuestions = useMemo(
-    () => quiz.questions.filter((question) => !isSubjectQuestion(question)),
-    [quiz],
+
+  // 解答题草稿（M1 表单语义）：文本与 fill 同形（selections[qid]=[text]），
+  // 图片单独存 subjectImages；body = 文本 + 图片 markdown 行。
+  const subjectHasDraft = useCallback(
+    (questionId: string) =>
+      (selections[questionId]?.[0] ?? '').trim().length > 0
+      || (subjectImages[questionId]?.length ?? 0) > 0,
+    [selections, subjectImages],
   );
-  const answeredCount = gradableQuestions.filter(
-    (question) => (selections[question.id]?.length ?? 0) > 0,
-  ).length;
-  // 解答题已作答数：从会话消息序推导（作答发生在聊天输入框），按指纹隔离
-  // ——两张同有第 3 题的卡各自独立，互不串。
-  const subjectAnsweredCount = useMemo(() => {
-    if (!fingerprint || !subjectStates) return 0;
+
+  // 整卷交卷消息的物化输入：只携带**当前草稿**（旧会话消息里推导已答的题
+  // 不重新物化——消息是事实，不重演）。
+  const subjectEntries = useMemo<SubjectAnswerEntry[]>(() => {
+    if (!fingerprint) return [];
     const key8 = fingerprint.slice(0, 8);
-    return quiz.questions.filter(
-      (question, index) =>
-        isSubjectQuestion(question)
-        && subjectStates.answered.has(gradingMapKey(key8, index + 1)),
-    ).length;
-  }, [quiz, fingerprint, subjectStates]);
+    const entries: SubjectAnswerEntry[] = [];
+    for (const [index, question] of quiz.questions.entries()) {
+      if (!isSubjectQuestion(question)) continue;
+      const body = [
+        (selections[question.id]?.[0] ?? '').trim(),
+        subjectImageMarkdown(subjectImages[question.id] ?? []),
+      ].filter(Boolean).join('\n');
+      if (!body) continue;
+      entries.push({
+        questionIndex: index + 1,
+        stem: question.stem,
+        points: question.answer,
+        sources: question.sources.map((source) => source.path),
+        fingerprintKey: key8,
+        body,
+      });
+    }
+    return entries;
+  }, [quiz, selections, subjectImages, fingerprint]);
+
+  // 草稿 ∪ 消息推导的解答题正文（回显 / 存为题库共用数据源；同键草稿优先）。
+  const mergedSubjectBodies = useMemo(
+    () => mergeSubjectDrafts(
+      quiz,
+      selections,
+      subjectImages,
+      subjectStates?.answers ?? new Map(),
+      fingerprintKey,
+    ),
+    [quiz, selections, subjectImages, subjectStates, fingerprintKey],
+  );
+
+  // 进度口径 = 整张卷子：草稿（文本或图片）∪ 旧会话推导已答（锚时代会话重开
+  // 时进度不丢）。纯图片草稿也算已答——图片会物化进交卷消息，批改方读得到。
+  const answeredCount = useMemo(() => {
+    let count = countQuizAnswered(quiz, selections, subjectImages);
+    if (fingerprint && subjectStates) {
+      const key8 = fingerprint.slice(0, 8);
+      for (const [index, question] of quiz.questions.entries()) {
+        if (!isSubjectQuestion(question)) continue;
+        const hasDraft = subjectHasDraft(question.id);
+        if (!hasDraft && subjectStates.answered.has(gradingMapKey(key8, index + 1))) count += 1;
+      }
+    }
+    return count;
+  }, [quiz, selections, subjectImages, fingerprint, subjectStates, subjectHasDraft]);
+
   const totalQuestionCount = quiz.questions.length;
-  // 有没有「交卷」这一步：有客观题 → 有「提交答案」按钮；纯主观题卡没有
-  // 客观题可交卷 → 没有这个动作（批改直接显示，否则这类卡永远揭晓不了）。
-  const hasSubmitAffordance = gradableQuestions.length > 0;
-  const ready = isQuizComplete(quiz, selections);
+  const unansweredCount = totalQuestionCount - answeredCount;
   const storageKey =
     fingerprint && conversationId ? quizStorageKey(conversationId, fingerprint) : null;
+
+  // 批改待回的解答题数（已答[草稿或推导]但批改未到）：>0 且 run 活动中 →
+  // foot 显示「批改中」占位；run 结束仍缺 → 停「已交卷」pill，不卡死。
+  const subjectPendingCount = useMemo(() => {
+    if (!fingerprint) return 0;
+    const key8 = fingerprint.slice(0, 8);
+    let count = 0;
+    for (const [index, question] of quiz.questions.entries()) {
+      if (!isSubjectQuestion(question)) continue;
+      const key = gradingMapKey(key8, index + 1);
+      const answered = subjectHasDraft(question.id) || (subjectStates?.answered.has(key) ?? false);
+      if (answered && !(subjectStates?.gradings.has(key) ?? false)) count += 1;
+    }
+    return count;
+  }, [quiz, fingerprint, subjectHasDraft, subjectStates]);
+
+  // 提交门槛：≥1 题已答（可交白卷的对称面——全空白卷没有可判分的内容）。
+  // 含解答草稿时还要求：指纹就绪（物化要带指纹行）且宿主发送链可用。
+  const paperNeeded = subjectEntries.length > 0;
+  const submitDisabled =
+    answeredCount === 0
+    || (paperNeeded && (paperSubmitDisabled || !fingerprint));
+  const submitDisabledTitle =
+    paperNeeded && paperSubmitDisabled ? t('quiz.submitNoRuntimeTitle') : undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -178,11 +312,14 @@ function QuizBody({
     restoredKeyRef.current = null;
     setSelections({});
     setSubmitted(false);
+    setSubjectImages({});
+    setConfirmOpen(false);
     try {
       const stored = parseStoredQuizState(localStorage.getItem(storageKey));
       if (stored) {
         setSelections(stored.selections);
         setSubmitted(stored.submitted);
+        setSubjectImages(stored.subjectImages);
       }
     } catch {
       // localStorage 不可用（隐私模式等）→ 只在内存里作答。
@@ -193,11 +330,11 @@ function QuizBody({
   useEffect(() => {
     if (!storageKey || restoredKeyRef.current !== storageKey) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify({ selections, submitted }));
+      localStorage.setItem(storageKey, JSON.stringify({ selections, submitted, subjectImages }));
     } catch {
       // 配额/隐私模式：不阻塞答题。
     }
-  }, [storageKey, selections, submitted]);
+  }, [storageKey, selections, submitted, subjectImages]);
 
   const toggle = useCallback(
     (questionId: string, type: Quiz['questions'][number]['type'], key: string) => {
@@ -218,7 +355,7 @@ function QuizBody({
     [submitted],
   );
 
-  // 填空作答：空文本存空数组（isQuizComplete 据此判未作答）。
+  // 填空作答与解答题草稿同一收口：空文本存空数组（已答计数据此判未作答）。
   const setFillText = useCallback(
     (questionId: string, text: string) => {
       if (submitted) return;
@@ -282,14 +419,16 @@ function QuizBody({
     [submitted, setFillText],
   );
 
-  const handleSubmit = useCallback(() => {
-    if (!ready || submitted) return;
+  // ── 整卷交卷（提交即快照：批改只发生在交卷消息上）────────────────────────
+  const doSubmit = useCallback(() => {
+    setConfirmOpen(false);
     setSubmitted(true);
 
     // 本地判分已完成；落库失败不阻塞用户看结果。
     // 空/超长 chosen 不进批次：daemon 对两者整批拒绝，会把整次提交的答题
     // 记录全部丢掉。超长只可能来自被改过的 localStorage（正常输入被
-    // maxLength 挡住），丢弃该题保住其余题目的落库。
+    // maxLength 挡住），丢弃该题保住其余题目的落库。纯解答卷（无客观已答）
+    // attempts 为空 → 不发落库请求（daemon 对空批次整批拒绝）。
     if (fingerprint) {
       const attempts = gradeQuiz(quiz, selections)
         .filter((grade) =>
@@ -301,78 +440,245 @@ function QuizBody({
         chosen: grade.chosen,
         correct: grade.correct,
       }));
-      void api.saveQuizAttempts({
-        vaultId: vaultId ?? null,
-        quizFingerprint: fingerprint,
-        conversationId: conversationId ?? null,
-        attempts,
-      }).catch(() => {
-        // 一期不向用户暴露落库失败：答题体验优先，错题本/统计是二期能力。
-      });
+      if (attempts.length > 0) {
+        void api.saveQuizAttempts({
+          vaultId: vaultId ?? null,
+          quizFingerprint: fingerprint,
+          conversationId: conversationId ?? null,
+          attempts,
+        }).catch(() => {
+          // 一期不向用户暴露落库失败：答题体验优先，错题本/统计是二期能力。
+        });
+      }
     }
-  }, [ready, submitted, fingerprint, quiz, selections, vaultId, conversationId]);
+
+    // 解答题物化成一条交卷消息（首行给人读），走宿主发送链——与普通消息
+    // 同一条路：run 进行中就排队，错误在消息流里出现。entries 空（纯客观卷
+    // /解答题全空）→ 不发消息、不建 run，只做本地判分。
+    const paperMessage = buildQuizSubmissionMessage(quiz.title, subjectEntries);
+    if (paperMessage) onSubmitPaper?.(paperMessage);
+  }, [fingerprint, quiz, selections, vaultId, conversationId, subjectEntries, onSubmitPaper]);
+
+  const handleSubmit = useCallback(() => {
+    if (submitted || answeredCount === 0) return;
+    if (paperNeeded && (!fingerprint || paperSubmitDisabled)) return;
+    // 未答完交卷（考试心智：可交白卷）：先展开 amber 确认条说后果，
+    // 「仍要交卷」二次放行——不打断，也不静默。
+    if (unansweredCount > 0) {
+      setConfirmOpen(true);
+      return;
+    }
+    doSubmit();
+  }, [submitted, answeredCount, paperNeeded, fingerprint, paperSubmitDisabled, unansweredCount, doSubmit]);
 
   const handleRedo = useCallback(() => {
-    setSelections({});
-    setSubmitted(false);
-    if (storageKey) {
-      try {
-        localStorage.removeItem(storageKey);
-      } catch {
-        // ignore
+    // 重做 = 回到作答态，且**可编辑**：上一版答案（消息推导）回填为草稿——
+    // 文字进 textarea、图片回缩略图（× 可删）。纯清空会让推导已答的题卡死在
+    // 只读回显里（真机反馈 2026-11-23：无法编辑、图片无法删除）。历史消息
+    // 照旧不动（回显与旧批改是事实）；重新交卷后新批改覆盖旧批改。
+    const nextSelections: QuizSelections = {};
+    const nextImages: Record<string, string[]> = {};
+    if (fingerprint && subjectStates) {
+      const key8 = fingerprint.slice(0, 8);
+      for (const [index, question] of quiz.questions.entries()) {
+        if (!isSubjectQuestion(question)) continue;
+        const key = gradingMapKey(key8, index + 1);
+        const draftText = (selections[question.id]?.[0] ?? '').trim();
+        const draftImages = subjectImages[question.id] ?? [];
+        if (draftText || draftImages.length > 0) {
+          // 已有本地草稿：原样保留（重做前编辑到一半的内容不丢）
+          nextSelections[question.id] = selections[question.id] ?? [];
+          nextImages[question.id] = draftImages;
+        } else {
+          const derived = subjectStates.answers.get(key);
+          if (derived) {
+            const { text, images } = splitSubjectBody(derived);
+            if (text) nextSelections[question.id] = [text];
+            if (images.length > 0) nextImages[question.id] = images;
+          }
+        }
       }
     }
-  }, [storageKey]);
+    setSelections(nextSelections);
+    setSubjectImages(nextImages);
+    setSubmitted(false);
+    setConfirmOpen(false);
+  }, [fingerprint, subjectStates, quiz, selections, subjectImages]);
 
-  // 「作答」只负责挂/摘锚：题干与隐藏评分点在发送时物化进消息（见
-  // ChatComposer + utils/quizAnswer.ts），题卡本身不收主观题答案。
-  // 指纹是异步算出的：点击早于指纹就绪时，锚上 key 为空串——指纹一到
-  // 就地补齐。归属认定与防环规则在 backfillAnchorFingerprint（内容所有权
-  // + 只碰空 key）：不满足条件时返回 null，不做任何写入。
-  useEffect(() => {
-    if (!fingerprint || !quizAnchor) return;
-    const healed = backfillAnchorFingerprint(quiz, fingerprint, quizAnchor);
-    if (healed) quizAnchorStore.set(healed, quizAnchor.questionId);
-  }, [fingerprint, quizAnchor, quiz]);
+  // ── 解答题卡内作答：上传 / 符号 / 粘贴 ───────────────────────────────────
+  const uploadInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const subjectInputRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
 
-  const toggleSubjectAnchor = useCallback(
-    (question: QuizQuestion, index: number) => {
-      // 归属判定用「题号 + 卡片身份」（指纹），不能只用围栏内题号——两张卡
-      // 几乎必然撞 id（「q3」）。用 id 会把 B 卡的锚误判成「当前题」→ 点第二
-      // 张卡变成取消而不是换锚 → 作答静默失效（消息不带物化块）。
-      if (anchorBelongsToQuestion(quizAnchor?.anchor, question, fingerprintKey, index + 1)) {
-        quizAnchorStore.clear();
-        return;
-      }
-      quizAnchorStore.set(
-        {
-          questionIndex: index + 1,
-          typeLabel: t('quiz.type.subject'),
-          stem: question.stem,
-          points: question.answer,
-          sources: question.sources.map((source) => source.path),
-          // 物化 v2 的「题目指纹」行来源：批改回写题卡的关联键（前 8 位）。
-          fingerprintKey: fingerprintKey,
-        },
-        question.id,
+  const uploadAnswerImage = useCallback(async (questionId: string, file: File) => {
+    if (!vaultId || uploadingFor) return;
+    setUploadErrorFor(null);
+    setUploadingFor(questionId);
+    try {
+      const { filePath } = await api.uploadAsset(vaultId, file);
+      setSubjectImages((prev) => ({
+        ...prev,
+        [questionId]: [...(prev[questionId] ?? []), filePath],
+      }));
+    } catch {
+      setUploadErrorFor(questionId);
+    } finally {
+      setUploadingFor(null);
+    }
+  }, [vaultId, uploadingFor]);
+
+  // 粘贴图片直接进作答（桌面拍照/截图工作流）：只拦图片文件，文本粘贴照常。
+  const handleSubjectPaste = useCallback(
+    (questionId: string, event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = Array.from(event.clipboardData.files).filter((file) =>
+        file.type.startsWith('image/'),
       );
+      if (files.length === 0) return;
+      event.preventDefault();
+      for (const file of files) void uploadAnswerImage(questionId, file);
     },
-    [quizAnchor, fingerprintKey, t],
+    [uploadAnswerImage],
   );
 
+  // 符号插入（textarea 版）：与 fill 同款光标插入，但**不设 64 上限**——那是
+  // daemon chosen 的契约，只约束填空；解答题正文没有长度上限。
+  const insertSubjectSymbol = useCallback(
+    (questionId: string, char: string) => {
+      if (submitted) return;
+      const input = subjectInputRefs.current[questionId];
+      if (!input) return;
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      const next = input.value.slice(0, start) + char + input.value.slice(end);
+      setFillText(questionId, next);
+      requestAnimationFrame(() => {
+        input.focus();
+        input.setSelectionRange(start + char.length, start + char.length);
+      });
+    },
+    [submitted, setFillText],
+  );
+
+  // auto-grow：空态一行高（≈48px），输入随内容生长，320px 封顶后内部滚动。
+  const growTextarea = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(320, Math.max(48, el.scrollHeight))}px`;
+  }, []);
+
+  // 确认条开着时把剩余的题答完了 → 文案会变成「还有 0 题」——自动收起。
+  useEffect(() => {
+    if (confirmOpen && unansweredCount === 0) setConfirmOpen(false);
+  }, [confirmOpen, unansweredCount]);
+
+  // 保存口径从同一份上下文派生（判定三态 / 作答正文 / 批改分数）。
+  const saveContext = useMemo<QuizSaveContext>(() => ({
+    submitted,
+    grades,
+    subjectGradings: subjectStates?.gradings ?? new Map(),
+    fingerprintKey,
+  }), [submitted, grades, subjectStates, fingerprintKey]);
+
+  const candidates = useMemo(() => classifyQuestions(quiz, saveContext), [quiz, saveContext]);
+  const wrongCount = candidates.filter((candidate) => candidate.outcome === 'wrong').length;
+  // 没有错题时「只存做错的」会是空集：静默退回全部，而不是让用户按下一个 0 题按钮。
+  const effectiveScope: QuizSaveScope = scope === 'wrong' && wrongCount === 0 ? 'all' : scope;
+  const selected = useMemo(
+    () => selectForSave(candidates, effectiveScope, picked),
+    [candidates, effectiveScope, picked],
+  );
+  const targetVault = useVaults().find((vault) => vault.id === vaultId);
+  const vaultName = targetVault?.name ?? '';
+  // 「在资源管理器中显示」只在桌面壳里成立（浏览器 / NAS 远程访问没有这个能力）
+  const revealReady = isRevealAvailable() && !!targetVault?.path;
+  const { openFile } = useFileNavigation();
+
+  const openSavePanel = useCallback(() => {
+    setScope(pickDefaultScope(candidates));
+    setPicked(new Set(candidates.filter((c) => c.outcome === 'wrong').map((c) => c.index)));
+    setSaveError(null);
+    setSaveOpen(true);
+  }, [candidates]);
+
+  const chooseScope = useCallback((next: QuizSaveScope) => {
+    // 切到「自己挑」时用错题预勾：用户多半是在默认集合上做增减。
+    setPicked((prev) => (next === 'pick' && prev.size === 0
+      ? new Set(candidates.filter((c) => c.outcome === 'wrong').map((c) => c.index))
+      : prev));
+    setScope(next);
+  }, [candidates]);
+
+  const togglePicked = useCallback((index: number) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
+
+  const clearSaveActionsTimer = useCallback(() => {
+    if (saveActionsTimerRef.current !== null) {
+      window.clearTimeout(saveActionsTimerRef.current);
+      saveActionsTimerRef.current = null;
+    }
+  }, []);
+
+  // 卸载时清定时器：卡片随消息流销毁后别再 setState。
+  useEffect(() => clearSaveActionsTimer, [clearSaveActionsTimer]);
+
   const handleSave = useCallback(async () => {
-    if (!vaultId || saving) return;
+    if (!vaultId || savingRef.current || selected.length === 0) return;
+    savingRef.current = true;
     setSaving(true);
     setSaveError(null);
     try {
-      const path = await saveQuizToVault(vaultId, quiz, api);
-      setSavedPath(path);
+      const input: QuizFileInput = {
+        title: quiz.title,
+        version: quiz.version,
+        fingerprint,
+        totalQuestions: quiz.questions.length,
+        questions: buildQuizFileQuestions(
+          quiz,
+          selected,
+          saveContext,
+          selections,
+          mergedSubjectBodies,
+        ),
+      };
+      const path = await saveQuizToVault(vaultId, input, api);
+      setSaved({ path, count: selected.length });
+      setSaveOpen(false);
+      setSaveActionsVisible(true);
+      clearSaveActionsTimer();
+      saveActionsTimerRef.current = window.setTimeout(
+        () => setSaveActionsVisible(false),
+        SAVE_ACTIONS_WINDOW_MS,
+      );
     } catch {
       setSaveError(t('quiz.saveFailed'));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }, [vaultId, saving, quiz, t]);
+  }, [vaultId, selected, quiz, fingerprint, saveContext, selections, mergedSubjectBodies, t, clearSaveActionsTimer]);
+
+  // 撤销 = 删掉刚写的那份文件。只在写盘成功后出现，删除成功即收起结果行；
+  // 失败保留结果行并说明原因（用户仍可以自己去库里删）。
+  const handleUndo = useCallback(async () => {
+    if (!vaultId || !saved || undoRef.current) return;
+    undoRef.current = true;
+    setUndoing(true);
+    setUndoError(null);
+    try {
+      await api.deleteFile(vaultId, saved.path);
+      setSaved(null);
+    } catch {
+      setUndoError(t('quiz.undoFailed'));
+    } finally {
+      undoRef.current = false;
+      setUndoing(false);
+    }
+  }, [vaultId, saved, t]);
 
   return (
     <div className="quiz-card" data-testid="quiz-card">
@@ -389,22 +695,34 @@ function QuizBody({
         const subjectAnswered = isSubject && subjectKey
           ? subjectStates?.answered.has(subjectKey) ?? false
           : false;
-        // 「作答」按钮的 .on 态：锚属于**这张卡的这道题**（题号 + 卡片身份），
-        // 不能只看围栏内题号——两张卡几乎必然撞 id。
-        const isAnchorOnThisQuestion = isSubject
-          && anchorBelongsToQuestion(quizAnchor?.anchor, question, fingerprintKey, index + 1);
-        // 揭晓门槛：批改结果与客观题判分**同批揭晓**——点「提交答案」前只显示
-        // 状态徽标（已作答/已批改），分数与逐点详情交卷后才出现。整张卷子一
-        // 次交卷、一次揭晓，与真实试卷一致。交卷后到达的批改照常显示。
-        // 纯主观题卡没有交卷动作（hasSubmitAffordance=false）→ 批改直接显示，
-        // 否则这类卡的批改永远不会出现。
-        const revealSubjectGrading = submitted || !hasSubmitAffordance;
+        // 解答题题级状态（M1 表单语义）：
+        // - 交卷前：推导已答（旧会话）→ 「已作答」；本地草稿 → 无 pill（进度条已表达）。
+        // - 交卷后：批改到达 → 得分徽标；空题 → 「未作答」；否则 run 活动期
+        //   「批改中」（呼吸点）、run 结束仍无回写 → 「已交卷」（无卡死态）。
+        const subjectDrafted = isSubject && subjectHasDraft(question.id);
+        const subjectUnanswered = isSubject && !subjectAnswered && !subjectDrafted;
+        // 「批改中」只给本次交卷快照里的题（有本地草稿）：旧会话推导已答但未
+        // 重新物化的题，新 run 不会为它产生批改——直接显示「已交卷」，不挂误导
+        // 性的等待态（终态本就正确，这里修的是过渡标签）。
+        const subjectPillState = subjectGrading
+          ? null
+          : subjectUnanswered
+            ? 'unanswered'
+            : conversationRunning && subjectDrafted
+              ? 'grading'
+              : 'awaiting';
+        // 回显（只读）：交卷后用草稿镜像（消息可能还在排队——不等消息落库
+        // 就能看回自己答了什么）；旧会话推导已答且无本地草稿 → 同款回显。
+        const subjectEchoBody = isSubject && subjectKey
+          && (submitted || (subjectAnswered && !subjectDrafted))
+          ? mergedSubjectBodies.get(subjectKey) ?? ''
+          : '';
         return (
           <div className="quiz-question" data-testid="quiz-question" data-question-id={question.id} key={question.id}>
             <div className="quiz-question-head">
               <span className="quiz-index">{t('quiz.question', { n: index + 1 })}</span>
               <span className="quiz-type" data-testid="quiz-type">{t(`quiz.type.${question.type}`)}</span>
-              {grade && !isSubject && (
+              {grade && !isSubject && grade.chosen.length > 0 && (
                 <span
                   className={`quiz-result ${grade.correct ? 'correct' : 'wrong'}`}
                   data-testid="quiz-result"
@@ -413,20 +731,43 @@ function QuizBody({
                   {grade.correct ? t('quiz.correct') : t('quiz.wrong')}
                 </span>
               )}
-              {/* 解答题状态徽标：与客观题的「正确/错误」徽标同一位置、同一语义
-               * ——交卷前只说「已作答/已批改」，交卷后才给分数。批改还没到达
-               * 时也显示（否则纯解答题卡在等待期里这一行什么都不显示）。 */}
-              {isSubject && subjectAnswered && !(subjectGrading && revealSubjectGrading) && (
+              {/* 解答题状态 pill：交卷前推导已答说「已作答」、已有批改说「已批改」
+               * （分数仍留给交卷揭晓）；交卷后未批改的题按 未作答/批改中/已交卷
+               * 三态显示（中性色，不透露判定）。 */}
+              {isSubject && !submitted && subjectGrading && (
                 <span
                   className="quiz-subject-status"
                   data-testid="quiz-subject-status"
-                  data-state={subjectGrading ? 'graded' : 'answered'}
+                  data-state="graded"
                 >
-                  {subjectGrading ? t('quiz.subjectGraded') : t('quiz.subjectAnswered')}
+                  {t('quiz.subjectGraded')}
+                </span>
+              )}
+              {isSubject && !subjectGrading && !submitted && subjectAnswered && (
+                <span
+                  className="quiz-subject-status"
+                  data-testid="quiz-subject-status"
+                  data-state="answered"
+                >
+                  {t('quiz.subjectAnswered')}
+                </span>
+              )}
+              {isSubject && !subjectGrading && submitted && subjectPillState && (
+                <span
+                  className={`quiz-subject-status${subjectPillState === 'grading' ? ' grading' : ''}`}
+                  data-testid="quiz-subject-status"
+                  data-state={subjectPillState}
+                >
+                  {subjectPillState === 'grading' && <span className="quiz-grading-dot" aria-hidden />}
+                  {subjectPillState === 'unanswered'
+                    ? t('quiz.subjectUnanswered')
+                    : subjectPillState === 'grading'
+                      ? t('quiz.subjectGrading')
+                      : t('quiz.subjectAwaiting')}
                 </span>
               )}
               {/* 大题批改回写：得分徽标（数字通用，判定详情折叠在行内）。 */}
-              {isSubject && subjectGrading && revealSubjectGrading && (
+              {isSubject && subjectGrading && submitted && (
                 <span
                   className="quiz-subject-score"
                   data-testid="quiz-subject-score"
@@ -445,23 +786,122 @@ function QuizBody({
               dangerouslySetInnerHTML={{ __html: renderQuizMarkdown(question.stem) }}
             />
 
-            {isSubject && (
-              /* 主观题行：无选项/无本地判分/无重做——作答走问答输入框，
-               * 按钮只负责挂/摘锚（发送时物化题干+隐藏评分点）。 */
-              <div className="quiz-subject-actions">
-                <button
-                  type="button"
-                  className={`quiz-btn quiz-answer-btn${isAnchorOnThisQuestion ? ' on' : ''}`}
-                  data-testid="quiz-answer-btn"
-                  data-question-id={question.id}
-                  aria-pressed={isAnchorOnThisQuestion}
-                  onClick={() => toggleSubjectAnchor(question, index)}
-                >
-                  {t('quiz.answerButton')}
-                </button>
+            {isSubject && subjectEchoBody ? (
+              /* 你的作答（只读回显）：交卷后作答区换安静面板；图片以行内
+               * 44px 高度还原（renderQuizMarkdown 已把库内路径改写为 raw URL）。 */
+              <div className="quiz-subject-echo" data-testid="quiz-subject-echo">
+                <div className="quiz-subject-echo-label">{t('quiz.yourAnswerLabel')}</div>
+                <div dangerouslySetInnerHTML={{ __html: renderQuizMarkdown(subjectEchoBody) }} />
               </div>
-            )}
-            {isSubject && subjectGrading && revealSubjectGrading && (
+            ) : isSubject ? (
+              /* 解答题作答区：fill 输入行的多行放大。容器内三层——textarea
+               * （auto-grow）/ 附件缩略图条 / 工具行（符号 + 插入图片）。 */
+              <div className="quiz-subject-input-row" data-fill-scope={question.id}>
+                <textarea
+                  ref={(el) => { subjectInputRefs.current[question.id] = el; growTextarea(el); }}
+                  className="quiz-subject-textarea"
+                  data-testid="quiz-subject-input"
+                  data-question-id={question.id}
+                  value={chosen[0] ?? ''}
+                  placeholder={t('quiz.subjectAnswerPlaceholder')}
+                  aria-label={t('quiz.subjectAnswerPlaceholder')}
+                  disabled={submitted}
+                  onChange={(event) => { setFillText(question.id, event.target.value); growTextarea(event.target); }}
+                  onPaste={(event) => handleSubjectPaste(question.id, event)}
+                />
+                {(subjectImages[question.id]?.length ?? 0) > 0 && (
+                  <div className="quiz-answer-assets" data-testid="quiz-answer-assets">
+                    {(subjectImages[question.id] ?? []).map((path, imageIndex) => (
+                      <span className="quiz-asset-thumb" key={`${path}-${imageIndex}`}>
+                        <img src={vaultId ? api.rawFileUrl(vaultId, path) : undefined} alt="" loading="lazy" />
+                        {!submitted && (
+                          <button
+                            type="button"
+                            className="quiz-asset-remove"
+                            data-testid="quiz-asset-remove"
+                            aria-label={t('quiz.removeImage')}
+                            onClick={() => setSubjectImages((prev) => ({
+                              ...prev,
+                              [question.id]: (prev[question.id] ?? []).filter((_, i) => i !== imageIndex),
+                            }))}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="quiz-subject-toolbar">
+                  <button
+                    type="button"
+                    className={`quiz-subject-tool${openSymbolsFor === question.id ? ' on' : ''}`}
+                    data-testid="quiz-subject-symbol"
+                    aria-expanded={openSymbolsFor === question.id}
+                    disabled={submitted}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => setOpenSymbolsFor((prev) => (prev === question.id ? null : question.id))}
+                  >
+                    {t('quiz.symbolTrigger')}
+                  </button>
+                  <button
+                    type="button"
+                    className="quiz-subject-tool"
+                    data-testid="quiz-subject-upload"
+                    disabled={submitted || uploadingFor === question.id || !vaultId}
+                    title={!vaultId ? t('quiz.saveNoVault') : undefined}
+                    onClick={() => uploadInputRefs.current[question.id]?.click()}
+                  >
+                    {uploadingFor === question.id ? t('quiz.uploading') : t('quiz.insertImage')}
+                  </button>
+                  {uploadErrorFor === question.id && (
+                    <span className="quiz-upload-error" role="alert">{t('quiz.uploadFailed')}</span>
+                  )}
+                  <input
+                    ref={(el) => { uploadInputRefs.current[question.id] = el; }}
+                    data-testid="quiz-subject-file"
+                    data-question-id={question.id}
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void uploadAnswerImage(question.id, file);
+                      event.target.value = '';
+                    }}
+                  />
+                </div>
+                {openSymbolsFor === question.id && (
+                  /* 解答题符号托盘：复用 fill 的四组通用难输入字符；文档流内
+                   * 手风琴展开，不盖下一题（同 fill 的防误触设计）。必须在
+                   * data-fill-scope 容器内——外点关闭器靠它豁免托盘内的按下。 */
+                  <div className="quiz-symbol-tray" data-testid="quiz-subject-symbol-tray">
+                    {FILL_SYMBOL_GROUPS.map((group) => (
+                      <div className="quiz-symbol-group" key={group.labelKey}>
+                        <span className="quiz-symbol-group-label">{t(group.labelKey)}</span>
+                        <div className="quiz-symbol-keys">
+                          {group.chars.map((char) => (
+                            <button
+                              key={char}
+                              type="button"
+                              className="quiz-symbol-btn"
+                              data-testid="quiz-symbol-btn"
+                              data-char={char}
+                              aria-label={char}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => insertSubjectSymbol(question.id, char)}
+                            >
+                              {char}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
+            {isSubject && subjectGrading && submitted && (
               <div className="quiz-subject-points" data-testid="quiz-subject-points">
                 <button
                   type="button"
@@ -552,11 +992,19 @@ function QuizBody({
               ) : question.options.map((option) => {
                 const on = chosen.includes(option.key);
                 const isAnswer = question.answer.includes(option.key);
+                // 提交后两条信息解耦到两个通道：标记（picked）只表达「我选了」，
+                // 绿/红颜色只表达「对不对」。单选靠红/绿就能反推自己的选择，多选
+                // 不行——「答案里有但没选」（漏选）与「选了且选对」都是绿色，没有
+                // 选中标记就无从区分。chosen 提交后冻结，标记天然持久。
+                // 标记形状承载结果（真机反馈：错选挂 ✓ 会被对勾的固有含义误读成
+                // 「正确」）：✓＝选对、✗＝选错、无标＝没选，与 CSS ::before 同形。
+                const picked = submitted && on;
                 const className = [
                   'quiz-option',
                   on ? 'on' : '',
                   submitted && isAnswer ? 'correct' : '',
                   submitted && on && !isAnswer ? 'wrong' : '',
+                  picked ? 'picked' : '',
                 ].filter(Boolean).join(' ');
                 return (
                   <button
@@ -567,6 +1015,8 @@ function QuizBody({
                     data-question-id={question.id}
                     data-key={option.key}
                     aria-pressed={on}
+                    data-picked={picked ? 'true' : 'false'}
+                    data-mark={picked ? (isAnswer ? '✓' : '✗') : undefined}
                     disabled={submitted}
                     onClick={() => toggle(question.id, question.type, option.key)}
                   >
@@ -584,6 +1034,16 @@ function QuizBody({
             {grade && !isSubject && (
               <div className="quiz-answer" data-testid="quiz-answer">
                 {t('quiz.answer', { answer: question.answer.join(' / ') })}
+              </div>
+            )}
+
+            {/* 「你的答案」行：与「正确答案」同格式并排。chosen 来自判分结果
+             * （contracts gradeQuiz 已去重排序），与判分口径同一份真相。只给
+             * 选项型客观题（single/multiple/judge）：填空的作答原文留在上方
+             * 输入框里可见，再印一行是重复；大题有自己的「你的答案」正文。 */}
+            {grade && !isSubject && question.type !== 'fill' && grade.chosen.length > 0 && (
+              <div className="quiz-your-answer" data-testid="quiz-your-answer">
+                {t('quiz.yourAnswer', { answer: grade.chosen.join(' / ') })}
               </div>
             )}
 
@@ -633,35 +1093,65 @@ function QuizBody({
       )}
 
       <div className="quiz-foot">
-        {hasSubmitAffordance && (
-          !submitted ? (
-            <button
-              type="button"
-              className="quiz-btn quiz-btn-primary"
-              data-testid="quiz-submit"
-              disabled={!ready}
-              onClick={handleSubmit}
-            >
-              {t('quiz.submit')}
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="quiz-btn"
-              data-testid="quiz-redo"
-              title={t('quiz.redoTitle')}
-              onClick={handleRedo}
-            >
-              {t('quiz.redo')}
-            </button>
-          )
+        {!submitted ? (
+          <button
+            type="button"
+            className="quiz-btn quiz-btn-primary"
+            data-testid="quiz-submit"
+            disabled={submitDisabled}
+            title={submitDisabledTitle}
+            onClick={handleSubmit}
+          >
+            {t('quiz.submit')}
+          </button>
+        ) : paperNeeded && conversationRunning && subjectPendingCount > 0 ? (
+          /* 批改中占位（非交互）：客观题已揭晓，主观等批改流式回流。
+           * run 结束仍无回写的题停在「已交卷」pill，不卡死。 */
+          <span className="quiz-grading-inline" data-testid="quiz-grading-inline">
+            <span className="quiz-grading-dot" aria-hidden />
+            {t('quiz.gradingPending')}
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="quiz-btn"
+            data-testid="quiz-redo"
+            title={t('quiz.redoTitle')}
+            onClick={handleRedo}
+          >
+            {t('quiz.redo')}
+          </button>
         )}
-        {/* 进度始终显示（口径 = 整张卷子：解答题答了就算已作答）。交卷后
+        {/* 未答完确认条：amber（提醒而非报错），文案说后果；通栏展开在 foot 内。 */}
+        {confirmOpen && !submitted && (
+          <div className="quiz-submit-confirm" role="alert" data-testid="quiz-submit-confirm">
+            <span>{t('quiz.confirmUnanswered', { n: unansweredCount })}</span>
+            <span className="quiz-submit-confirm-actions">
+              <button
+                type="button"
+                className="quiz-btn"
+                data-testid="quiz-confirm-continue"
+                onClick={() => setConfirmOpen(false)}
+              >
+                {t('quiz.continueAnswering')}
+              </button>
+              <button
+                type="button"
+                className="quiz-btn quiz-btn-primary"
+                data-testid="quiz-confirm-submit"
+                onClick={doSubmit}
+              >
+                {t('quiz.submitAnyway')}
+              </button>
+            </span>
+          </div>
+        )}
+        {/* 进度始终显示（口径 = 整张卷子：草稿 ∪ 推导已答）。交卷后
             按钮换成「重做」，但计数留着——交卷那一刻正是用户想看「答了几题」。 */}
         {totalQuestionCount > 0 && (
           <span className="quiz-progress" data-testid="quiz-progress">
             {t('quiz.answeredProgress', {
-              done: answeredCount + subjectAnsweredCount,
+              done: answeredCount,
               total: totalQuestionCount,
             })}
           </span>
@@ -672,17 +1162,151 @@ function QuizBody({
           className="quiz-btn"
           data-testid="quiz-save-kb"
           disabled={!vaultId || saving}
+          aria-expanded={saveOpen}
           title={!vaultId ? t('quiz.saveNoVault') : undefined}
-          onClick={handleSave}
+          onClick={() => (saveOpen ? setSaveOpen(false) : openSavePanel())}
         >
           {saving ? t('quiz.saving') : t('quiz.save')}
         </button>
-        {savedPath && (
-          <span className="quiz-saved" data-testid="quiz-saved-path">
-            {t('quiz.saved', { path: savedPath })}
-          </span>
+
+        {saveOpen && (
+          <div className="quiz-save-panel" data-testid="quiz-save-panel">
+            <div className="quiz-save-target" data-testid="quiz-save-target">
+              {t('quiz.saveTarget', { vault: vaultName })}
+            </div>
+
+            <div className="quiz-scopes" role="radiogroup" aria-label={t('quiz.save')}>
+              {wrongCount > 0 && (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={effectiveScope === 'wrong'}
+                  className="quiz-btn quiz-scope"
+                  data-testid="quiz-scope-wrong"
+                  onClick={() => chooseScope('wrong')}
+                >
+                  {t('quiz.saveScopeWrong', { count: wrongCount })}
+                </button>
+              )}
+              <button
+                type="button"
+                role="radio"
+                aria-checked={effectiveScope === 'all'}
+                className="quiz-btn quiz-scope"
+                data-testid="quiz-scope-all"
+                onClick={() => chooseScope('all')}
+              >
+                {t('quiz.saveScopeAll', { count: candidates.length })}
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={effectiveScope === 'pick'}
+                className="quiz-btn quiz-scope"
+                data-testid="quiz-scope-pick"
+                onClick={() => chooseScope('pick')}
+              >
+                {t('quiz.saveScopePick')}
+              </button>
+            </div>
+
+            <div className="quiz-save-list" data-testid="quiz-save-list">
+              {effectiveScope === 'pick' ? candidates.map(({ index, outcome }) => (
+                <label key={index} className="quiz-save-row">
+                  <input
+                    type="checkbox"
+                    className="quiz-save-check"
+                    data-testid="quiz-save-pick"
+                    checked={picked.has(index)}
+                    onChange={() => togglePicked(index)}
+                  />
+                  <span className="quiz-save-index">{index + 1}</span>
+                  <span className="quiz-save-stem">{previewStem(quiz.questions[index]!.stem)}</span>
+                  <span className={`quiz-save-badge ${outcome}`}>
+                    {outcome === 'correct' ? t('quiz.outcomeCorrect')
+                      : outcome === 'wrong' ? t('quiz.outcomeWrong') : t('quiz.outcomeUngraded')}
+                  </span>
+                </label>
+              )) : selected.map(({ index, outcome }) => (
+                <div key={index} className="quiz-save-row quiz-save-row--static">
+                  <span className="quiz-save-index">{index + 1}</span>
+                  <span className="quiz-save-stem">{previewStem(quiz.questions[index]!.stem)}</span>
+                  <span className={`quiz-save-badge ${outcome}`}>
+                    {outcome === 'correct' ? t('quiz.outcomeCorrect')
+                      : outcome === 'wrong' ? t('quiz.outcomeWrong') : t('quiz.outcomeUngraded')}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="quiz-save-actions">
+              <button
+                type="button"
+                className="quiz-btn quiz-btn-primary"
+                data-testid="quiz-save-confirm"
+                disabled={saving || selected.length === 0}
+                onClick={handleSave}
+              >
+                {saving ? t('quiz.saving') : t('quiz.saveConfirm', { count: selected.length })}
+              </button>
+              <button
+                type="button"
+                className="quiz-btn"
+                data-testid="quiz-save-cancel"
+                onClick={() => setSaveOpen(false)}
+              >
+                {t('quiz.saveCancel')}
+              </button>
+            </div>
+
+            {saveError && <span className="quiz-error" role="alert">{saveError}</span>}
+          </div>
         )}
-        {saveError && <span className="quiz-error" role="alert">{saveError}</span>}
+
+        {saved && (
+          <div className="quiz-save-result" data-testid="quiz-save-result">
+            <span className="quiz-save-result-text" title={saved.path}>
+              {t('quiz.savedSummary', { count: saved.count, path: saved.path })}
+            </span>
+            {(saveActionsVisible || undoError) && (
+              <span
+                className="quiz-save-result-actions"
+                // 键盘焦点落进按钮就把窗口收掉：否则读到「撤销」时按钮被计时器抽走，
+                // 焦点跌回 body。
+                onFocusCapture={clearSaveActionsTimer}
+              >
+                <button
+                  type="button"
+                  className="quiz-btn quiz-save-action"
+                  data-testid="quiz-save-open"
+                  onClick={() => { if (vaultId) openFile(vaultId, saved.path); }}
+                >
+                  {t('quiz.saveOpen')}
+                </button>
+                {revealReady && (
+                  <button
+                    type="button"
+                    className="quiz-btn quiz-save-action"
+                    data-testid="quiz-save-reveal"
+                    onClick={() => { if (targetVault?.path) revealInFolder(targetVault.path, saved.path); }}
+                  >
+                    {t('quiz.saveReveal')}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="quiz-btn quiz-save-action"
+                  data-testid="quiz-save-undo"
+                  disabled={undoing}
+                  onClick={handleUndo}
+                >
+                  {t('quiz.saveUndo')}
+                </button>
+              </span>
+            )}
+            {undoError && <span className="quiz-error" role="alert">{undoError}</span>}
+          </div>
+        )}
       </div>
     </div>
   );

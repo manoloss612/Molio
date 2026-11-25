@@ -15,6 +15,17 @@ import { useActiveVault, useActiveVaultId, vaultStore } from '../../stores/vault
 import { navigationHistoryStore, useNavigationHistory } from '../../stores/navigationHistoryStore';
 import { useGraphSettings } from './useGraphSettings';
 import { graphFingerprint, refreshDebounceMs } from './refreshPolicy';
+import { buildTrunkScene, resolveTrunkView, trunkExportMeta, type TrunkScene } from './trunkScene';
+import {
+  buildExpansion,
+  computeMiniSim,
+  centroidOf,
+  translatePositions,
+  radialFillPositions,
+  splitBatches,
+  matchExpansionsOnRefresh,
+} from './trunkExpand';
+import { getLayoutService } from './layoutService';
 import { GraphSettingsPanel } from './GraphSettingsPanel';
 import { GraphSearchBox } from './GraphSearchBox';
 import { Minimap } from './Minimap';
@@ -140,6 +151,18 @@ export function GraphPage({
   onNodeOpenRef.current = onNodeOpen;
   const onScopeResetRef = useRef(onScopeReset);
   onScopeResetRef.current = onScopeReset;
+  // trunk（T2）：引擎回调只建一次，经 ref 读最新值
+  const updateSettingsRef = useRef(updateSettings);
+  updateSettingsRef.current = updateSettings;
+
+  // ── trunk 展开编排（H2，设计 §4.1 + 代拍 F/G + 评审 #3）──
+  /** 展开缓存：clusterId → 位置（sim 坐标）+ 全量成员序 + 活性（收起翻假——刷新只匹配
+   *  live 条目，代拍 G 的位置缓存保留但不得被后台刷新复活，终审 #2） */
+  const expandedRef = useRef<
+    Map<string, { positions: Map<string, { x: number; y: number }>; members: string[]; live: boolean }>
+  >(new Map());
+  /** 上一份 trunk 场景（后台刷新的身份重匹配用，代拍 O） */
+  const prevTrunkSceneRef = useRef<TrunkScene | null>(null);
   // scope 的稳定标识：换 file / 换 dir 才重新拉数据
   const scopeKey = graphScope ? `${graphScope.type}:${graphScope.path}` : null;
 
@@ -257,6 +280,124 @@ export function GraphPage({
   }, [graphData, settings.showOrphans, settings.showDeadLinks, settings.visibleTypes]);
 
   const hasData = !!engineData && engineData.nodes.length > 0;
+
+  // ── trunk 场景派生与生效判定（T2，纯逻辑在 trunkScene.ts，见该文件注释）──
+  // companion 副视图与局部 scope 永不 trunk（设计 §4.2：它们本就只渲染邻域）。
+  // deps 用 scopeKey 字符串而非 scope 对象（本文件既定防御约定，见 fetch effect 注释）
+  const trunkScene = useMemo<TrunkScene | null>(
+    () => (graphData && !companion && scopeKey === null ? buildTrunkScene(graphData) : null),
+    [graphData, companion, scopeKey],
+  );
+  const trunkView = useMemo(
+    () =>
+      resolveTrunkView({
+        scope: graphScope,
+        scene: trunkScene,
+        globalView: settings.globalView,
+        showOrphans: settings.showOrphans,
+        showDeadLinks: settings.showDeadLinks,
+        visibleTypes: settings.visibleTypes,
+        companion,
+      }),
+    [scopeKey, trunkScene, settings.globalView, settings.showOrphans, settings.showDeadLinks, settings.visibleTypes, companion],
+  );
+  // 引擎回调（创建时一次性注册）经 ref 读最新 trunk 场景
+  const trunkSceneRef = useRef<TrunkScene | null>(null);
+  trunkSceneRef.current = trunkScene;
+  const trunkViewRef = useRef(trunkView);
+  trunkViewRef.current = trunkView;
+
+  const expandCluster = (clusterId: string, opts?: { focus?: string; trigger?: 'click' | 'search' | 'zoom' }) => {
+    // trigger 是 H2+ 缩放分区展开的接口预留（同一入口三源）；本段实现 click/search，zoom 占位不派发
+    void opts?.trigger;
+    const engine = engineRef.current;
+    const scene = trunkSceneRef.current;
+    const graph = graphDataRef.current;
+    if (!engine || !scene || !graph || !trunkViewRef.current.active) return;
+
+    // 已在展开态：只定位（终审 #1：重复搜索/点击已展开簇不得走展开路径——那会拿不到 blob、
+    // 以原点为锚 mini-sim 覆写位置缓存，收起再展开时整簇跳到原点）
+    if (engine.getTrunkExpandedClusters().includes(clusterId)) {
+      if (opts?.focus) engine.focusNode(opts.focus);
+      return;
+    }
+
+    // 代拍 G：曾展开过又收起 → 缓存位置瞬时重展开（不重算）
+    const cached = expandedRef.current.get(clusterId);
+    if (cached) {
+      const again = buildExpansion(scene, graph, clusterId, new Set(engine.getTrunkExpandedClusters()));
+      if (again) {
+        cached.live = true;
+        engine.expandTrunkCluster(clusterId, again, cached.positions, [...cached.positions.keys()], { animate: false });
+        if (opts?.focus) engine.focusNode(opts.focus);
+        return;
+      }
+    }
+
+    // expandedIds 一律取引擎真相（终审 #3a：页面缓存含已收起条目，拿它裁边会让跨簇边凭空消失）
+    const payload = buildExpansion(scene, graph, clusterId, new Set(engine.getTrunkExpandedClusters()));
+    if (!payload || payload.memberNodes.length === 0) return;
+    const batches = splitBatches(payload.memberOrder);
+    const first = batches[0];
+    if (!first) return;
+    const snap = engine.getSnapshot();
+    const blobPos = snap?.nodes.find((n) => n.key === clusterId);
+    const centroid = blobPos ? { x: blobPos.x, y: blobPos.y } : centroidOf(new Map());
+
+    // 位置来源（评审 #3）：worker 全量布局就绪且覆盖该簇 → 质心对齐平移，全批即刻落位；
+    // 否则首批 mini-sim + 余批流式（本簇走到底，worker 就绪不迁移）
+    const layout = getLayoutService();
+    const workerPos = layout.isReady() ? layout.getPositions() : null;
+    if (workerPos && payload.memberOrder.every((k) => workerPos.has(k))) {
+      const clusterPos = new Map<string, { x: number; y: number }>();
+      for (const k of payload.memberOrder) clusterPos.set(k, workerPos.get(k)!);
+      const translated = translatePositions(clusterPos, centroidOf(clusterPos), centroid);
+      expandedRef.current.set(clusterId, { positions: translated, members: payload.memberOrder, live: true });
+      engine.expandTrunkCluster(clusterId, payload, translated, first);
+      for (const b of batches.slice(1)) engine.appendTrunkMembers(clusterId, payload, translated, b);
+      if (opts?.focus) engine.focusNode(opts.focus);
+      return;
+    }
+
+    const placed = computeMiniSim(first, payload.edges, centroid);
+    expandedRef.current.set(clusterId, { positions: placed, members: payload.memberOrder, live: true });
+    engine.expandTrunkCluster(clusterId, payload, placed, first);
+    if (opts?.focus) engine.focusNode(opts.focus);
+    let bi = 1;
+    const step = () => {
+      const cache = expandedRef.current.get(clusterId);
+      if (!cache) return; // 场景已换
+      if (!engine.getTrunkExpandedClusters().includes(clusterId)) return; // 已收起，停流
+      const batch = batches[bi++];
+      if (!batch) return;
+      // 余批 radial 续接铺位（O(n)）：巨簇 3997 的 ≤2s 流式预算兑现——mini-sim 只跑首批
+      // 出结构骨干（度数降序 = 高连接成员），余批围绕已落位外缘 golden 螺旋续铺；
+      // worker 就绪路径（展开前已算完）不受影响，给的是真布局
+      let maxR = 0;
+      for (const p of cache.positions.values()) {
+        maxR = Math.max(maxR, Math.hypot(p.x - centroid.x, p.y - centroid.y));
+      }
+      const filled = radialFillPositions(batch, centroid, maxR, cache.positions.size);
+      const merged = new Map(cache.positions);
+      for (const k of batch) merged.set(k, filled.get(k)!);
+      cache.positions = merged;
+      engine.appendTrunkMembers(clusterId, payload, merged, batch);
+      setTimeout(step, 0); // 块间让出主线程
+    };
+    setTimeout(step, 0);
+  };
+  const expandClusterRef = useRef(expandCluster);
+  expandClusterRef.current = expandCluster;
+
+  const collapseCluster = (clusterId: string) => {
+    // 位置缓存保留（代拍 G：再展开瞬时）但活性翻假——后台刷新只匹配 live 条目，
+    // 用户收起的簇不得被文件变更复活（终审 #2）
+    const cache = expandedRef.current.get(clusterId);
+    if (cache) cache.live = false;
+    engineRef.current?.collapseTrunkCluster(clusterId);
+  };
+  const collapseClusterRef = useRef(collapseCluster);
+  collapseClusterRef.current = collapseCluster;
 
   // ── 出图卡片内容 ──
   // 一律取**筛选后的** engineData：卡片上的统计和核心主题必须跟图面严格对得上，
@@ -378,7 +519,17 @@ export function GraphPage({
       // 单击 / 双击节点都打开文章 —— 三处图谱（全量图 / 局部知识图谱 / 对照）行为完全一致。
       // 「高亮关联」由悬停承担（引擎 hover 两档：非邻居淡化 + 关联边置顶），与 Obsidian 原生图谱同款
       // （悬停高亮、单击打开）；「单击选中」不提供——它与悬停重复，而「看邻域」已由局部知识图谱专门承担。
-      eng.setCallbacks({ onNodeClick: openNode, onNodeDoubleClick: openNode });
+      eng.setCallbacks({
+        onNodeClick: openNode,
+        onNodeDoubleClick: openNode,
+        // H2：点击簇团 = 真展开（替换 H1 拍板 A 的「切全量+框邻域」，开关不再翻转）
+        onTrunkClusterClick: (clusterId) => {
+          expandClusterRef.current(clusterId, { trigger: 'click' });
+        },
+        onTrunkCollapseClick: (clusterId) => {
+          collapseClusterRef.current(clusterId);
+        },
+      });
       engineRef.current = eng;
       // 开发环境调试句柄：像素提取（renderer.extract）与布局检查
       if (import.meta.env.DEV) {
@@ -415,6 +566,8 @@ export function GraphPage({
   const lastVaultRef = useRef<string | null>(null);
   // 上一次的 scope 标识：用于识别「局部图 → 全量图」的返回（需要重新取景）
   const prevScopeKeyRef = useRef<string | null>(null);
+  // 上一次是否处于 trunk（识别 trunk→full 跳变：全量数据规模剧变，需立即重取景）
+  const prevTrunkActiveRef = useRef(false);
   useEffect(() => {
     if (!engine) return;
     const scope = scopeRef.current;
@@ -428,11 +581,74 @@ export function GraphPage({
       engine.setData([], []);
       return;
     }
-    if (lastVaultRef.current !== activeVaultId) {
+    const vaultChanged = lastVaultRef.current !== activeVaultId;
+    if (vaultChanged) {
       lastVaultRef.current = activeVaultId;
       engine.resetPositions();
     }
+
+    // ── trunk 分支（T2 + H2 刷新保态）：setTrunkData 内部同步 settle + 立即 fit ──
+    const wasTrunk = prevTrunkActiveRef.current;
+    prevTrunkActiveRef.current = trunkView.active;
+    if (trunkView.active && trunkScene) {
+      // H2 刷新保态（代拍 O）：同库同 scope 的后台刷新 = 视口不动 + 展开态按最小成员 key
+      // 重匹配（≥80% 成员重合才保，新增成员 mini-sim 补位）；首次/换库/换 scope = 全新场景
+      const refresh = wasTrunk && !vaultChanged && prevScopeKey === currentScopeKey && !!prevTrunkSceneRef.current;
+      if (refresh) {
+        // 只匹配 live 条目（终审 #2：已收起的簇有位置缓存但不得被刷新复活）
+        const liveIds = [...expandedRef.current.entries()]
+          .filter(([, v]) => v.live)
+          .map(([k]) => k);
+        const match = matchExpansionsOnRefresh(prevTrunkSceneRef.current!, trunkScene, liveIds);
+        for (const d of match.drop) expandedRef.current.delete(d);
+        const keepCaches = new Map<
+          string,
+          { positions: Map<string, { x: number; y: number }>; members: string[]; live: boolean }
+        >();
+        for (const { oldId, newId } of match.keep) {
+          const cache = expandedRef.current.get(oldId);
+          if (!cache) continue;
+          expandedRef.current.delete(oldId);
+          keepCaches.set(newId, cache);
+        }
+        engine.setTrunkData(trunkScene, { preserveViewport: true });
+        for (const [newId, cache] of keepCaches) expandedRef.current.set(newId, cache);
+        for (const [newId, cache] of keepCaches) {
+          const payload = buildExpansion(trunkScene, graphData!, newId, new Set(keepCaches.keys()));
+          if (!payload) continue;
+          engine.expandTrunkCluster(newId, payload, cache.positions, [...cache.positions.keys()], { animate: false });
+          const newMembers = trunkScene.clusters.find((c) => c.id === newId)?.memberIds ?? [];
+          const added = newMembers.filter(
+            (m) => !cache.positions.has(m) && payload.memberNodes.some((n) => n.key === m),
+          );
+          if (added.length > 0) {
+            const sim = computeMiniSim(
+              [...new Set([...cache.positions.keys(), ...added])],
+              payload.edges,
+              centroidOf(cache.positions),
+              cache.positions,
+            );
+            const merged = new Map(cache.positions);
+            for (const k of added) merged.set(k, sim.get(k)!);
+            engine.appendTrunkMembers(newId, payload, merged, added);
+            expandedRef.current.set(newId, { positions: merged, members: newMembers, live: true });
+          } else {
+            expandedRef.current.set(newId, { positions: cache.positions, members: newMembers, live: true });
+          }
+        }
+        prevTrunkSceneRef.current = trunkScene;
+        return;
+      }
+      prevTrunkSceneRef.current = trunkScene;
+      expandedRef.current.clear();
+      engine.setTrunkData(trunkScene);
+      return;
+    }
+    // 离开 trunk（开关/筛选/scope/换库）：展开态清（代拍 I：会话瞬态不持久化）
+    if (wasTrunk || expandedRef.current.size > 0) expandedRef.current.clear();
+    prevTrunkSceneRef.current = null;
     engine.setData(engineData.nodes, engineData.edges);
+    if (wasTrunk) engine.fitView({ animate: false }); // trunk→full：旧视口对着几十个对象的布局，无意义
 
     // ── 取景：对照副格 → 整张子图 fit；file → 圆心居中放大；dir → 子图 fit；全量图 → 整图 fit ──
     // 布局在收敛前一直在动，早取景会落在错误位置（这是「切换后视角不对」的根因），所以：
@@ -474,7 +690,31 @@ export function GraphPage({
     } else if (scope) {
       applyView(activeRef.current);
     }
-  }, [engine, engineData, activeVaultId, graphData, companion]);
+  }, [engine, engineData, activeVaultId, graphData, companion, trunkView, trunkScene]);
+
+  // ── 后台全量布局（H2 §4.2 + 代拍 E/P）：trunk 可交互后 idle 启动（不抢首开预算），
+  // 换库/换 scope 时 ensure 换键自动重启；用户改 forces 不触碰；展开中不迁移（评审 #3）──
+  useEffect(() => {
+    if (!trunkView.active || !trunkScene || companion || !activeVaultId || !graphData) return;
+    const nodeKeys = graphData.nodes.filter((n) => !n.deadLink).map((n) => n.key);
+    // 边必须裁到节点集内：死链占位端点不在 nodeKeys 里，原样喂给 worker 的 forceLink
+    // 会抛 "node not found"（layout 永不就绪 + 控制台报错——合成 10k 库探针实测抓到）
+    const keySet = new Set(nodeKeys);
+    const links = graphData.edges
+      .filter((e) => keySet.has(e.source) && keySet.has(e.target))
+      .map((e) => ({ source: e.source, target: e.target }));
+    const key = `${activeVaultId}|global`;
+    const idle: (cb: () => void) => number =
+      typeof window.requestIdleCallback === 'function'
+        ? (cb) => window.requestIdleCallback(cb)
+        : (cb) => window.setTimeout(cb, 0) as unknown as number;
+    const handle = idle(() => getLayoutService().ensure(key, nodeKeys, links));
+    return () => {
+      if (typeof window.cancelIdleCallback === 'function' && typeof handle === 'number') {
+        window.cancelIdleCallback(handle);
+      }
+    };
+  }, [trunkView.active, trunkScene, companion, activeVaultId, graphData]);
 
   // ── 外观/力度参数实时下发（不重建仿真布局）──
   useEffect(() => {
@@ -512,13 +752,26 @@ export function GraphPage({
     setExportNote(null);
     setExporting(true);
 
-    const metaLine = `${t('graph.nodes', { count: engineData?.nodes.length ?? 0 })} · ${t(
-      'graph.edges',
-      { count: engineData?.edges.length ?? 0 },
-    )}`;
-    const topicsLine = coreTopics.length
-      ? `${t('graph.exportCoreTopics')}${coreTopics.join(' · ')}`
-      : '';
+    // 统计行与图面严格对得上（出图红线）：trunk 态截的是 trunk 画布（几个团），
+    // 统计/核心主题/图例必须换成 trunk 口径或省略——写全库计数就是卡片撒谎
+    //（终审 Important-3；代拍只豁免「导出所见」的位图行为，不豁免文案失配）
+    const trunkActive = trunkView.active && !!trunkScene;
+    const metaLine = trunkActive
+      ? trunkExportMeta(
+          trunkScene!,
+          t('graph.trunkClustersLabel'),
+          t('graph.trunkHubsLabel'),
+          expandedRef.current.size,
+          t('graph.trunkExpandedLabel'),
+        )
+      : `${t('graph.nodes', { count: engineData?.nodes.length ?? 0 })} · ${t(
+          'graph.edges',
+          { count: engineData?.edges.length ?? 0 },
+        )}`;
+    const topicsLine =
+      !trunkActive && coreTopics.length
+        ? `${t('graph.exportCoreTopics')}${coreTopics.join(' · ')}`
+        : '';
     const title = activeVault?.name ?? '';
     const aspect = exportAspect;
     const includeInfo = exportIncludeInfo;
@@ -542,7 +795,7 @@ export function GraphPage({
         title,
         meta: metaLine,
         topics: topicsLine,
-        legend: exportLegend,
+        legend: trunkActive ? [] : exportLegend,
         watermark: EXPORT_WATERMARK,
         ink: cardInkFor(themeColors.bg),
         bg: themeColors.bg,
@@ -651,7 +904,21 @@ export function GraphPage({
                   <GraphSearchBox
                     autoFocus
                     nodes={engineData.nodes}
+                    clusters={trunkView.active ? trunkScene?.clusters : undefined}
+                    onSelectCluster={(id) => {
+                      // trunk 态命中簇名：就地高亮该簇（聚合边置顶），不切视图
+                      engineRef.current?.highlightTrunkCluster(id);
+                    }}
                     onSelect={(key) => {
+                      // trunk 态命中节点（H2 替换拍板 A）：命中簇成员 → 展开该簇 + 定位（留在
+                      // trunk 态，开关不翻转）；hub/不在簇里的节点 → 直接定位
+                      if (trunkView.active) {
+                        const cluster = trunkScene?.clusters.find((c) => c.memberIds.includes(key));
+                        if (cluster) {
+                          expandClusterRef.current(cluster.id, { focus: key, trigger: 'search' });
+                          return;
+                        }
+                      }
                       engineRef.current?.focusNode(key);
                     }}
                   />
@@ -682,10 +949,23 @@ export function GraphPage({
             <div className="graph-stats-ctrl">
               {showStats && (
                 <div className="graph-stats-pop">
-                  <span>{t('graph.nodes', { count: nodeCount })}</span>
-                  <span>{t('graph.edges', { count: edgeCount })}</span>
-                  {graphData.deadLinks && graphData.deadLinks.length > 0 && (
-                    <span className="graph-stat--deadlink">{t('graph.deadLinks', { count: graphData.deadLinks.length })}</span>
+                  {trunkView.active && trunkScene ? (
+                    /* trunk 口径（T2 deferred minor 归位）：ℹ 显示画面上的 trunk 对象，不写全库计数 */
+                    <>
+                      <span>{t('graph.trunkClustersLabel')} {trunkScene.clusters.length}</span>
+                      <span>{t('graph.trunkHubsLabel')} {trunkScene.hubs.length}</span>
+                      {trunkScene.crumbCount > 0 && (
+                        <span>{t('graph.trunkCrumbs', { count: trunkScene.crumbCount })}</span>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <span>{t('graph.nodes', { count: nodeCount })}</span>
+                      <span>{t('graph.edges', { count: edgeCount })}</span>
+                      {graphData.deadLinks && graphData.deadLinks.length > 0 && (
+                        <span className="graph-stat--deadlink">{t('graph.deadLinks', { count: graphData.deadLinks.length })}</span>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -796,6 +1076,29 @@ export function GraphPage({
               <circle cx="15" cy="16" r="2.7" />
             </svg>
           </button>
+          {/* 全局视图开关（trunk T2，设计 §4.2 拍板 #5）：大库默认枝干。
+              no-communities（小库/局部 scope/副视图）不渲染；筛选偏离默认态置灰（reason==='filters'）。
+              开关状态 = globalView 持久化设置；点击簇团/搜索命中成员的过渡切换也翻转它（拍板 A）。 */}
+          {trunkView.reason !== 'no-communities' && (
+            <button
+              type="button"
+              className={`graph-icon-btn${trunkView.active ? ' is-active' : ''}`}
+              onClick={() => updateSettings({ globalView: trunkView.active ? 'full' : 'trunk' })}
+              disabled={trunkView.reason === 'filters'}
+              data-tooltip={trunkView.reason === 'filters' ? t('graph.trunkFiltersBlocked') : t('graph.viewModeToggle')}
+              aria-label={t('graph.viewModeToggle')}
+              aria-pressed={trunkView.active}
+              data-testid="graph-view-mode-toggle"
+            >
+              {/* 枝干：主干 + 两叉 */}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                <circle cx="12" cy="5" r="2.4" />
+                <circle cx="5" cy="19" r="2.4" />
+                <circle cx="19" cy="19" r="2.4" />
+                <path d="M12 7.4v4.2M12 11.6 6.2 16.8M12 11.6l5.8 5.2" />
+              </svg>
+            </button>
+          )}
           {/* 局部图作用域的「回到全量图」：任意非空 scope 都显示（file/dir 均由宿主是否传 onScopeReset 决定）
               —— 与搜索/统计/设置同款磨砂 icon-btn；onClick 走 ref，避免闭包过期 */}
           {graphScope && onScopeReset && (
@@ -849,6 +1152,24 @@ export function GraphPage({
           <div className="graph-scope-loading" data-testid="graph-scope-loading" role="status">
             <span className="graph-scope-loading__spinner" />
             <span>{t('graph.loading')}</span>
+          </div>
+        )}
+
+        {/* trunk 模式指示（T2）：确认用户看到的是枝干 + 碎屑不在屏的事实（计数告知）；
+            degenerate 如实提示（仍渲染，不自动退全量——设计 §4.1 退化保护） */}
+        {trunkView.active && (
+          <div className="graph-trunk-indicator" data-testid="graph-trunk-indicator">
+            <span>{t('graph.trunkIndicator')}</span>
+            {trunkScene && trunkScene.crumbCount > 0 && (
+              <span className="graph-trunk-crumbs">
+                {t('graph.trunkCrumbs', { count: trunkScene.crumbCount })}
+              </span>
+            )}
+          </div>
+        )}
+        {trunkView.active && trunkScene?.quality === 'degenerate' && (
+          <div className="graph-trunk-banner" data-testid="graph-trunk-banner">
+            {t('graph.trunkDegenerate')}
           </div>
         )}
 
