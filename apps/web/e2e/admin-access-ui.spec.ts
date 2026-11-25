@@ -184,7 +184,7 @@ test('logout cancels a PDF that is still loading even when logout cannot be conf
   try{await expect.poll(()=>page.evaluate(()=>(window as any).__pdfAborts)).toBeGreaterThan(0);}finally{release();}
 });
 test('administrator creates and removes an isolated vault with authenticated JSON and DELETE',async({page,admin})=>{
-  await page.goto(`${admin.origin}/knowledge`);await login(page,admin);await page.locator('.kb-vault-bar').first().click();await page.locator('.vm-action-btn-primary').click();
+  await page.goto(`${admin.origin}/knowledge`);await login(page,admin);await page.locator('.kb-vault-bar').first().click();await page.getByTestId('vault-create-action').click();
   const fields=page.locator('.vm-create-form input');await fields.nth(0).fill('Administrator created vault');await fields.nth(1).fill(join(admin.vaultDir,'../new-vault'));
   const created=page.waitForResponse(r=>r.url().endsWith('/api/knowledge/vaults')&&r.request().method()==='POST');await page.locator('.vm-submit-btn').click();const response=await created;expect(response.status()).toBe(201);expect((await response.request().allHeaders())['x-molio-csrf']).toMatch(/^[a-f0-9]{64}$/);
   const vault=await response.json();const row=page.locator('.vm-vault-item').filter({hasText:'Administrator created vault'});await row.hover();await row.getByTestId('vault-more-btn').click();await page.getByTestId('vault-menu-remove').click();

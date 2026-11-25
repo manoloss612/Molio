@@ -96,7 +96,9 @@ MOLIO_IMAGE=molio:main MOLIO_SKIP_PULL=1 bash install.sh
 
 ## 6. 当前本机 main 实例
 
-2026-11-25 已将个人 main `dab2b70` 的编译产物部署到 `~/.molio/deployments/local-main/releases/dab2b70/`。沿用原演示独立数据库与知识库路径、管理员账号；数据库在线备份在 `~/.molio/deployments/local-main/backup-before-main.sqlite`。没有搬移个人 `~/.molio/app.sqlite` 数据库。
+本机实例使用个人 main 的编译产物，按提交短哈希保存到 `~/.molio/deployments/local-main/releases/<commit>/`；当前运行提交和资源目录见同目录 `deployment.json`。沿用原演示独立数据库、知识库路径与当前管理员配置，没有搬移个人 `~/.molio/app.sqlite` 数据库。
+
+首次切换 main 的数据库备份为 `~/.molio/deployments/local-main/backup-before-main.sqlite`；2026-11-25 同步上游前的代码、在线数据库、知识库及运行配置备份位于 `~/.molio/backups/pre-upstream-sync-20261125/`。更新前再生成 `pre-deploy.sqlite` 和知识库备份，避免回退时遗漏验证期间的新数据。
 
 地址：`https://localhost:46735/`。仍只监听本机，证书为本机测试证书；其他设备访问和真实域名证书验收属于下一步。
 
@@ -107,7 +109,7 @@ systemctl --user stop molio-local-main.service
 journalctl --user -u molio-local-main.service
 ```
 
-服务为用户级，随用户会话启动；未开启系统级启动或 linger。`~/.molio/deployments/local-main/daemon-env.json` 含凭据哈希、数据路径，权限 600；不要公开该文件。程序与数据路径记录在同目录 `deployment.json`，daemon 输出在 `daemon.log`。管理员账号密码沿用原演示，不在仓库中记录。
+服务为用户级，随用户会话启动；未开启系统级启动或 linger。`~/.molio/deployments/local-main/daemon-env.json` 含凭据哈希、数据路径，权限 600；不要公开该文件。程序与数据路径记录在同目录 `deployment.json`，daemon 输出在 `daemon.log`。管理员凭据以本机部署配置为准，不在仓库中记录。
 
 ## 7. 验证范围与发布状态
 
