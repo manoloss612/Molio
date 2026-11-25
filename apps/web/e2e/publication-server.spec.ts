@@ -21,7 +21,7 @@ test('HTTPS visitor reads only the active revision and withdrawn content becomes
   await expect(page.locator('.entry-shell')).toBeVisible();
   await page.getByTestId('kb-btn-public-wiki').click();
   await page.getByTestId('publication-page-row').filter({ hasText: 'acceptance-public.md' }).getByRole('checkbox').check();
-  await page.getByTestId('publication-preview').click();
+  await page.getByTestId('publication-batch-publish').click();
   await page.getByTestId('publication-commit').click();
   const row = page.getByTestId('publication-page-row').filter({ hasText: 'acceptance-public.md' });
   await expect(row).toContainText('已发布');

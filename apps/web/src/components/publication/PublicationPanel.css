@@ -9,13 +9,16 @@
 .publication-panel__site label { display: flex; align-items: center; gap: 6px; }
 .publication-panel__site span { margin-left: auto; color: #777c73; }
 .publication-panel__list { display: grid; gap: 8px; }
+.publication-panel__list-actions { display: flex; justify-content: flex-end; }
+.publication-panel__list-actions button { padding: 6px 10px; border: 1px solid #dfe3db; border-radius: 7px; color: #426d52; background: #fff; font-size: 12px; font-weight: 600; }
 .publication-page-row { min-height: 44px; padding: 8px 10px; display: flex; align-items: center; gap: 12px; border: 1px solid #e8e9e5; border-radius: 9px; font-size: 13px; }
 .publication-page-row label { min-width: 0; flex: 1; display: flex; align-items: center; gap: 9px; overflow-wrap: anywhere; }
 .publication-page-row__status { color: #7b8076; font-size: 12px; white-space: nowrap; }
 .publication-page-row button { border: 0; background: transparent; color: #a24b3b; cursor: pointer; }
-.publication-panel__actions { padding: 18px 0; }
+.publication-panel__actions { padding: 18px 0; display: flex; flex-wrap: wrap; gap: 10px; }
 .publication-panel button:not(.publication-panel__header button) { cursor: pointer; }
 .publication-panel__actions button, .publication-preview > button { padding: 10px 16px; border: 0; border-radius: 8px; color: #fff; background: #426d52; font-weight: 650; }
+.publication-panel__actions .publication-panel__withdraw-selected { border: 1px solid #dfc7c2; color: #994a3b; background: #fff; }
 .publication-panel button:disabled { opacity: .5; cursor: not-allowed; }
 .publication-preview { margin-top: 12px; padding: 18px; border: 1px solid #dfe8dc; border-radius: 12px; background: #f8faf6; }
 .publication-preview h3 { margin-top: 0; }
