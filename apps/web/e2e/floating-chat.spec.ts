@@ -881,7 +881,8 @@ test.describe('Floating chat (方案 D)', () => {
     const bb2 = (await btn.boundingBox())!;
     await page.mouse.move(bb2.x + 26, bb2.y + 26);
     await page.mouse.down();
-    await page.mouse.move(vw - 30, 300, { steps: 8 });
+    // 已贴右缘，纯水平位移可能不足 6px；用明确的斜向拖动，避免被当作点击打开面板。
+    await page.mouse.move(vw - 30, Math.max(40, bb2.y + 26 - 120), { steps: 8 });
     await page.mouse.up();
     await page.waitForTimeout(450);
     await expect(btn).toHaveClass(/floating-chat-btn--hidden/);
