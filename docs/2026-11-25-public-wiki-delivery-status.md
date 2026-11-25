@@ -71,3 +71,29 @@
 原始日志位于 `/tmp/molio-pr11-{typecheck,web-unit,build,minimap-red,full-e2e-final}.log`；完整浏览器报告位于功能工作区 `apps/web/playwright-report/`，JSON 结果位于 `apps/web/test-results/results.json`。这些是本地生成件，不进入仓库。构建使用 Node 24；浏览器测试使用与本机 SQLite 原生模块匹配的 Node 26（两者满足项目 Node >=24 要求）。本次未运行平台打包或生产公网部署验证。
 
 独立审查未发现新增匿名访问安全问题。个人仓库仅有本人协作者，本次依照用户明确的审查合并授权和既有阶段集成约定，在本地验证后合入 `feat/admin-web-access`；不将其表述为有独立 GitHub 人工 approve 或 CI 门禁通过。
+
+## 个人仓库 main 集成
+
+用户随后明确授权将功能合入个人仓库 `manoloss612/Molio` 的 `main`。核对时 main 为 `ed95ae2`，已通过 PR #1–#3 纳入一期到三期；阶段分支还停留在较早的上游基线。因此本次从最新 main 创建 `feat/public-wiki-main-closeout`，只迁入 PR #11 的 squash 提交 `cc36db9`，保留 main 中后续市场、测验与 Windows 路径等更新。
+
+当前集成差异为 15 个文件，无冲突；独立审查未发现新增阻塞问题。本轮已对最新 main 集成结果重新执行验证，结果见下方。上节 652 项通过是阶段分支的历史验证，不能替代本轮 main 验证。
+
+合入 main 后的下一步是部署交付：先检查 server 模式与管理员初始化在 Docker、compose、环境模板及安装脚本中的接线，再选择外部可访问的部署环境，以正式域名和 TLS 验收公开阅读、发布/更新/撤回/关闭和匿名管理访问拒绝。main 合并不触发本文所承诺的公网部署或正式发行。
+
+主线首轮回归在悬浮按钮“再次藏边”用例中复现失败：按钮已贴右缘时，原手势仅移动约 4px，小于产品 6px 拖动阈值，被正确识别为点击，打开面板后按钮消失。修复测试为有明确纵向位移的斜向拖动，保留全部藏边、唤回和重载断言；定向连续运行 3 次通过。首轮因已确认失败而主动停止（202 passed，469 did not run，退出码 130），不算完整通过；最终完整运行单独记录。
+
+### main 最终验证（2026-11-25）
+
+| 检查 | 结果 |
+| --- | --- |
+| 全工作区构建（串行调度以控制内存） | 通过：`pnpm -r --workspace-concurrency=1 build` |
+| `pnpm typecheck` | 通过 |
+| Web 单元测试 | 698 通过，0 失败 |
+| daemon 全量测试 | 2081 项：2069 通过，12 平台/环境跳过，0 失败 |
+| 最终完整 Web E2E | 673 项：671 通过，2 跳过，0 失败，0 flaky，38.0 分钟，无重试，退出码 0 |
+
+完整 E2E 跳过项为 `kb-large-file-too-large`（专用低上限环境）及市场管理员入口用例（验证码登录未返回 devCode 时的既有条件跳过）。后一项另行使用干净隔离环境补跑，结果追加于下方。完整结果保持 671/2 的原始口径，不将定向补跑拼成另一轮全量结果。
+
+主线验证日志：`/tmp/molio-main-{contracts,typecheck-final,unit,build,daemon,e2e-final,drag-green,skipped-market}.log`。首次检查使用了切换分支前的 contracts 构建产物，导致市场新字段类型缺失；清理重建 contracts 后，最终类型检查通过。最终完整 E2E 的产品代码与拟合入主线代码一致；其后只补充本文验证记录。
+
+市场管理员入口的隔离补跑结果：`playwright test e2e/market-community.spec.ts --grep '管理员：门禁未决'`，1 passed（44.6 秒），退出码 0。完整运行的 HTML 报告另存于功能工作区 `.artifacts/main-closeout/full-playwright-report/`，以免定向补跑覆盖；完整原始日志仍为 `/tmp/molio-main-e2e-final.log`。
