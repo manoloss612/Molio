@@ -1,6 +1,8 @@
 # 第三期设计草案：公开 Wiki 与知识图谱
 
 日期：2026-11-11
+
+2026-11-25 补充：当前界面、原方案替代关系、交付状态和部署欠项见 [当前设计与交付状态](2026-11-25-public-wiki-delivery-status.md)。公开图谱已复用 Pixi/d3 引擎，管理面板新增全选、批量发布与批量撤回；图谱展示行为以此补充为准。
 状态：用户已确认按本设计稿开始第三期构建；逐篇公开范围与发布快照语义已确认。站点范围、图片处理和交互细节采用文档所列建议。
 依据：`/home/ss/Projects/molio/HANDOFF.md`、`docs/2026-11-04-phase2-admin-web-access-design.md`、`docs/2026-11-06-phase2-admin-web-access-acceptance-followup.md`。交接文件中关于第二期尚未开始等文字是历史状态，以第二期跟进记录和实时 Git 状态为准。
 

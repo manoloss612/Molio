@@ -105,6 +105,14 @@ test('administrator publishes selected Wiki pages and anonymous visitor navigate
     await expect(publicGraph).toBeVisible();
     await expect(publicGraph).toHaveAttribute('data-node-count', '2');
     await expect.poll(async () => Number(await publicGraph.getAttribute('data-zoom-scale'))).toBeGreaterThan(0);
+    const minimap = publicGraph.getByTestId('graph-minimap');
+    await expect(minimap).toHaveCSS('position', 'absolute');
+    await expect(minimap).toHaveCSS('width', '160px');
+    const minimapBox = await minimap.boundingBox();
+    const viewportBox = await publicGraph.boundingBox();
+    expect(minimapBox).toBeTruthy();
+    expect(viewportBox).toBeTruthy();
+    expect(minimapBox!.y + minimapBox!.height).toBeLessThanOrEqual(viewportBox!.y + viewportBox!.height);
     const initialZoom = Number(await publicGraph.getAttribute('data-zoom-scale'));
     await visitor.getByTestId('public-graph-zoom-out').click();
     await expect.poll(async () => Number(await publicGraph.getAttribute('data-zoom-scale'))).toBeLessThan(initialZoom);
